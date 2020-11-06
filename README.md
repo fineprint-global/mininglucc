@@ -4,6 +4,8 @@
 # mininglucc
 
 [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh///master?urlpath=rstudio)
+[![Travis build
+status](https://travis-ci.com/fineprint-global/mininglucc.svg?branch=master)](https://travis-ci.com/fineprint-global/mininglucc)
 
 This repository contains the data and code for our paper:
 
@@ -66,13 +68,19 @@ packages this analysis depends on (also listed in the
 
 ### Licenses
 
-**Text and figures :**
-[CC-BY-4.0](http://creativecommons.org/licenses/by/4.0/)
+**Text and figures :** [CC
+BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)
 
-**Code :** See the [DESCRIPTION](DESCRIPTION) file
+**Code :** [GPL-3](http://www.gnu.org/licenses/gpl-3.0.html). See
+[LICENSE.md](LICENSE.md) and [DESCRIPTION](DESCRIPTION) files
 
-**Data :** [CC-0](http://creativecommons.org/publicdomain/zero/1.0/)
-attribution requested in reuse
+**Data :**
+
+  - Mining polygons [CC
+    BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)
+    attribution requested in reuse
+
+  - Mining commodities are simulated for reproducibility.
 
 ### Contributions
 
