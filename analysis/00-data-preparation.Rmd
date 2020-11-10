@@ -24,17 +24,20 @@ w = c(0.00125199972177784, 0.00765110941086458, 0.00410377686582736, 0.179488071
 
 For mining areas we use the mining polygons data set available from [10.1594/PANGAEA.910894](https://doi.org/10.1594/PANGAEA.910894). This data set is described here [10.1038/s41597-020-00624-w](https://doi.org/10.1038/s41597-020-00624-w). The polygons cover the entire globe. 
 ```{r get-mining-polygons}
+raw_data_path <- here::here('analysis', 'data', 'raw_data')
+derived_data_path <- here::here('analysis', 'data', 'derived_data')
+
 pg_record <- pangaear::pg_data(doi = "10.1594/PANGAEA.910894", overwrite = TRUE, mssgs = TRUE)
 unzip(zipfile = pg_record[[1]]$path, 
       files = "global_mining_polygons_v1.gpkg", 
       overwrite = TRUE, 
-      exdir = here::here("analysis", "data", "raw_data"))
+      exdir = derived_data_path)
 
 mining_pol <- sf::st_read(
-  dsn = here::here("analysis", "data", "raw_data", "global_mining_polygons_v1.gpkg"),
+  dsn = stringr::str_glue("{derived_data_path}/global_mining_polygons_v1.gpkg"),
   fid_column_name = "FID",
   stringsAsFactors = FALSE,
-  query = "SELECT geom, COUNTRY_NAME, ISO3_CODE, AREA FROM mining_polygons") 
+  query = "SELECT geom, ISO3_CODE, AREA FROM mining_polygons") 
 
 mining_pol %>% 
   sf::st_drop_geometry() %>% 
@@ -55,7 +58,7 @@ mining_pol %>%
 
 Information on extracted commodities is often not openly available. Here we simulate a data set of mining commodities and coordinates. 
 ```{r get-mining-commodities}
-mining_com_path <- here::here("analysis", "data", "raw_data", "mining_commodities.gpkg")
+mining_com_path <- stringr::str_glue("{derived_data_path}/mining_commodities.gpkg")
 if (!file.exists(mining_com_path)){
   set.seed(1986)
   n_samples <- 200

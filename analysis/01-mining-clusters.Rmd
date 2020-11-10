@@ -21,17 +21,17 @@ knitr::opts_chunk$set(echo = TRUE)
 For details see [00-data-preparation.Rmd]. 
 
 ```{r read-data}
-raw_data_path <- here::here('analysis', 'data', 'raw_data')
+derived_data_path <- here::here('analysis', 'data', 'derived_data')
 
 mining_com <- sf::st_read(
-  dsn = stringr::str_glue("{raw_data_path}/mining_commodities.gpkg"),
+  dsn = stringr::str_glue("{derived_data_path}/mining_commodities.gpkg"),
   fid_column_name = "FID_DATASET",
   stringsAsFactors = FALSE,
   query = "SELECT geom, ISO3_CODE FROM mining_commodities") %>% 
   dplyr::mutate(DATASET = "commodities")
 
 mining_pol <- sf::st_read(
-  dsn = stringr::str_glue("{raw_data_path}/global_mining_polygons_v1.gpkg"),
+  dsn = stringr::str_glue("{derived_data_path}/global_mining_polygons_v1.gpkg"),
   fid_column_name = "FID_DATASET",
   stringsAsFactors = FALSE,
   query = "SELECT geom, ISO3_CODE FROM mining_polygons") %>% 
@@ -47,7 +47,6 @@ In this step we calculate the distances among all mining features in meters.
 The results are saved to the `output_dir` per each country. 
 
 ```{r dist}
-derived_data_path <- here::here('analysis', 'data', 'derived_data')
 output_dir <- stringr::str_glue("{derived_data_path}/{format(Sys.time(), '%Y%m%d%H%M')}")
 mining_split <- split(mining_features, mining_features$ISO3_CODE)
 pb <- progress::progress_bar$new(total = length(mining_split))
@@ -67,7 +66,7 @@ Features further than 10 km from each other are related only if other features c
 see [10.1038/s41597-020-00624-w](https://doi.org/10.1038/s41597-020-00624-w).
 
 ```{r clusters}
-h <- units::set_units(10000, m) 
+h <- units::set_units(10000, m)
 dist_files <- dir(stringr::str_glue("{output_dir}/dist_matrix"), full.names = TRUE)
 names(dist_files) <- stringr::str_remove_all(basename(dist_files), ".rds")
 country_clusters <- parallel::mclapply(names(dist_files), function(f){
