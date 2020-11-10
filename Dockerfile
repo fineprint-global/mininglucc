@@ -16,4 +16,4 @@ RUN . /etc/environment \
   && R -e "devtools::install('/mininglucc', dep=TRUE)" \
   # render the manuscript into a docx, you'll need to edit this if you've
   # customised the location and name of your main Rmd file
-  && R -e "rmarkdown::render('/mininglucc/analysis/paper/paper.Rmd')"
+  && R -e "rmarkdown::render('/mininglucc/analysis/00-data-preparation.Rmd')"
