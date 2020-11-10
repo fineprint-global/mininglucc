@@ -37,7 +37,7 @@ mining_pol <- sf::st_read(
   query = "SELECT geom, ISO3_CODE FROM mining_polygons") %>% 
   dplyr::mutate(DATASET = "polygons")
 
-mining_features <- rbind(mining_com, mining_pol) %>% 
+mining_features <- dplyr::bind_rows(mining_com, mining_pol) %>% 
   dplyr::mutate(FID = dplyr::row_number())
 ```
 
@@ -51,7 +51,7 @@ derived_data_path <- here::here('analysis', 'data', 'derived_data')
 output_dir <- stringr::str_glue("{derived_data_path}/{format(Sys.time(), '%Y%m%d%H%M')}")
 mining_split <- split(mining_features, mining_features$ISO3_CODE)
 pb <- progress::progress_bar$new(total = length(mining_split))
-system.time(country_cluster <- purrr::map_dfr(
+system.time(dist_matrices <- purrr::map_dfr(
   .x = mining_split,
   .f = mininglucc::calc_dist_matrix,
   output_dir = output_dir, 

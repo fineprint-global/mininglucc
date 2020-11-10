@@ -12,7 +12,7 @@
 #' @importFrom sf st_distance st_geometry
 #' @importFrom stringr str_glue
 #'
-#' @return path to the distance matrix
+#' @return TRUE if success FALSE if could not create the distance matrix
 #' @export
 calc_dist_matrix <- function(x,
                              output_dir = ".",
@@ -25,7 +25,7 @@ calc_dist_matrix <- function(x,
 
   # stop processing if job has less than two features --------------------------
   if( nrow(x) < 2 ){
-    return(c(geo = NULL))
+    return(FALSE)
   }
 
   # compute geographical distance in parallel ----------------------------------
@@ -43,6 +43,6 @@ calc_dist_matrix <- function(x,
 
   }
 
-  return(c(geo = path_features_dist_meter))
+  return(TRUE)
 
 }
