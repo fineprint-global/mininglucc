@@ -3,3 +3,4 @@
 .RData
 analysis/data
 analysis/*.html
+.Rprofile

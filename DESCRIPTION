@@ -15,13 +15,13 @@ Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.1.1
 Imports: 
     bookdown,
-    magrittr (>= 1.5),
-    stringr (>= 1.4.0),
+    parallel,
+    stats,
+    magrittr,
+    stringr,
     sf (>= 0.9-6),
     lwgeom (>= 0.2-5),
-    dplyr (>= 1.0.2),
-    stats (>= 4.0.3),
-    parallel (>= 4.0.3)
+    dplyr (>= 1.0.2)
 Suggests: 
     devtools,
     git2r,
