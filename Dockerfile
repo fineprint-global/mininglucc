@@ -18,6 +18,8 @@ RUN . /etc/environment \
     fastcluster \
     progress \
     remotes \
+    here \
+    pangaear \
   # r packages versions
   && R -e "remotes::install_version('sf', version = '0.9-6', dependencies= T)" \
   && R -e "remotes::install_version('lwgeom', version = '0.2-5', dependencies= T)" \

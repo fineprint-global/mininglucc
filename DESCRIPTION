@@ -27,4 +27,7 @@ Suggests:
     git2r,
     ggplot2,
     fastcluster,
-    progress
+    progress,
+    purrr,
+    pangaear,
+    units
