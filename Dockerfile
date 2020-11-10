@@ -6,7 +6,6 @@ MAINTAINER Victor Maus <vwmaus1@gmail.com>
 
 COPY . /mininglucc
 
-# go into the repo directory
 RUN . /etc/environment \
   # Install linux depedendencies here
   # e.g. need this for ggforce::geom_sina
