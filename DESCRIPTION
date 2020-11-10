@@ -2,10 +2,10 @@ Package: mininglucc
 Title: What the Package Does (One Line, Title Case)
 Version: 0.0.0.9000
 Authors@R:
-    person(given = "First",
-           family = "Last",
+    person(given = "Victor",
+           family = "Maus",
            role = c("aut", "cre"),
-           email = "first.last@example.com")
+           email = "vwmaus1@gmail.com")
 Description: What the package does (one paragraph).
 License: GPL-3
 ByteCompile: true
@@ -13,7 +13,17 @@ Encoding: UTF-8
 LazyData: true
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.1.1
-Imports: bookdown,
-    here
-Suggests: devtools,
-    git2r
+Imports: 
+    bookdown,
+    magrittr,
+    stringr,
+    sf,
+    stats,
+    parallel
+Suggests: 
+    devtools,
+    git2r,
+    ggplot2,
+    dplyr,
+    fastcluster,
+    progress

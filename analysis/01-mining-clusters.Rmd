@@ -1,0 +1,89 @@
+---
+title: "Create mining clusters"
+author: "Victor Maus"
+date: "11/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(fastcluster)
+library(magrittr)
+library(progress)
+library(parallel)
+library(dplyr)
+library(sf)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Read raw data
+
+For details see [00-data-preparation.Rmd]. 
+
+```{r read-data}
+raw_data_path <- here::here('analysis', 'data', 'raw_data')
+
+mining_com <- sf::st_read(
+  dsn = stringr::str_glue("{raw_data_path}/mining_commodities.gpkg"),
+  fid_column_name = "FID_DATASET",
+  stringsAsFactors = FALSE,
+  query = "SELECT geom, ISO3_CODE FROM mining_commodities") %>% 
+  dplyr::mutate(DATASET = "commodities")
+
+mining_pol <- sf::st_read(
+  dsn = stringr::str_glue("{raw_data_path}/global_mining_polygons_v1.gpkg"),
+  fid_column_name = "FID_DATASET",
+  stringsAsFactors = FALSE,
+  query = "SELECT geom, ISO3_CODE FROM mining_polygons") %>% 
+  dplyr::mutate(DATASET = "polygons")
+
+mining_features <- dplyr::bind_rows(mining_com, mining_pol) %>% 
+  dplyr::mutate(FID = dplyr::row_number())
+```
+
+## Calculate distance matrix per country
+
+In this step we calculate the distances among all mining features in meters. 
+The results are saved to the `output_dir` per each country. 
+
+```{r dist}
+derived_data_path <- here::here('analysis', 'data', 'derived_data')
+output_dir <- stringr::str_glue("{derived_data_path}/{format(Sys.time(), '%Y%m%d%H%M')}")
+mining_split <- split(mining_features, mining_features$ISO3_CODE)
+pb <- progress::progress_bar$new(total = length(mining_split))
+system.time(country_cluster <- purrr::map_dfr(
+  .x = mining_split,
+  .f = calc_dist_matrix,
+  output_dir = output_dir, 
+  pb = pb)
+)
+```
+
+## Create mining clusters per country 
+
+Below we cluster mining features based on the distance matrix for each country. 
+We set the cutting distance to 10 km, see `?fastcluster::hclust` and `?stats::cutree`.
+Features further than 10 km from each other are related only if other features connect them,
+see [10.1038/s41597-020-00624-w](https://doi.org/10.1038/s41597-020-00624-w).
+
+```{r clusters}
+h <- units::set_units(10000, m) 
+dist_files <- dir(stringr::str_glue("{output_dir}/dist_matrix"), full.names = TRUE)
+names(dist_files) <- stringr::str_remove_all(basename(dist_files), ".rds")
+country_clusters <- parallel::mclapply(names(dist_files), function(f){
+  hcluster <- readRDS(dist_files[[f]]) %>% 
+    fastcluster::hclust(method = "single") %>% 
+    cutree(h = as.numeric(units::set_units(h, m)))
+  mining_split[[f]] %>% 
+    dplyr::mutate(ID_CLUSTER = hcluster)
+}) %>% 
+dplyr::bind_rows()
+
+sf::st_write(country_clusters, 
+             delete_dsn = TRUE,
+             dsn = stringr::str_glue("{output_dir}/country_clusters.geojson"))
+
+sf::st_write(country_clusters, 
+             delete_dsn = TRUE,
+             dsn = stringr::str_glue("{output_dir}/country_clusters.gpkg"))
+```
+

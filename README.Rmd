@@ -16,7 +16,7 @@ Title <- "Title of your paper goes here"
 
 # mininglucc
 
-[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh///master?urlpath=rstudio) [![Travis-CI Build Status](https://travis-ci.org/fineprint-global/mininglucc.svg?branch=master)](https://travis-ci.org/fineprint-global/mininglucc)
+[![Launch Rstudio Binder](http://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/fineprint-global/mininglucc/master?urlpath=rstudio) [![Travis-CI Build Status](https://travis-ci.org/fineprint-global/mininglucc.svg?branch=master)](https://travis-ci.org/fineprint-global/mininglucc)
 
 This repository contains the data and code for our paper:
 
