@@ -17,7 +17,7 @@ Default is work dir}
 Default is NULL}
 }
 \value{
-path to the distance matrix
+TRUE if success FALSE if could not create the distance matrix
 }
 \description{
 Calculate distance matrix in parallel
