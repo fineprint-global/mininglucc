@@ -2,7 +2,7 @@
 
 env:
   global:
-  - REPO=$DOCKER_USER/mininglucc
+  - REPO=fineprint-global/mininglucc
 
 sudo: required
 
