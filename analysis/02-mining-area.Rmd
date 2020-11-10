@@ -1,0 +1,37 @@
+---
+title: "Global mining area"
+author: "Victor Maus"
+date: "11/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Read mining clusters 
+
+For details see [01-mining-clusters.Rmd]. 
+
+```{r read-data}
+derived_data_path <- here::here('analysis', 'data', 'derived_data')
+cluster_version <- "202011101718"
+
+mining_com <- sf::st_read(
+  dsn = stringr::str_glue("{derived_data_path}/mining_commodities.gpkg"),
+  fid_column_name = "FID_DATASET",
+  stringsAsFactors = FALSE,
+  query = "SELECT geom, ISO3_CODE, COUNTRY_NAME, COMMODITES FROM mining_commodities") 
+
+mining_pol <- sf::st_read(
+  dsn = stringr::str_glue("{derived_data_path}/global_mining_polygons_v1.gpkg"),
+  fid_column_name = "FID_DATASET",
+  stringsAsFactors = FALSE,
+  query = "SELECT geom, ISO3_CODE, COUNTRY_NAME, AREA FROM mining_polygons") %>% 
+  dplyr::mutate(DATASET = "polygons")
+
+mining_clusters <- sf::st_read(
+  dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/country_clusters.geojson"),
+  stringsAsFactors = FALSE) 
+  
+```
