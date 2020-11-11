@@ -41,7 +41,7 @@ mining_pol <- sf::st_read(
   dsn = stringr::str_glue("{derived_data_path}/global_mining_polygons_v1.gpkg"),
   fid_column_name = "FID",
   stringsAsFactors = FALSE,
-  query = "SELECT geom, ISO3_CODE, AREA FROM mining_polygons") 
+  query = "SELECT geom, ISO3_CODE, COUNTRY_NAME, AREA FROM mining_polygons") 
 
 mining_pol %>% 
   sf::st_drop_geometry() %>% 
