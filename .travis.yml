@@ -20,10 +20,9 @@ before_install:
 # push our custom docker container to docker hub, env vars stored on travis-ci.org
 after_success:
   - docker login -u $DOCKER_USER -p $DOCKER_PASS
-  - export REPO=fineprint/mininglucc
-#  - export TAG=`if [ "$TRAVIS_BRANCH" == "main" ]; then echo "latest"; else echo $TRAVIS_BRANCH ; fi` # Doesn't work
-#  - export TAG=latest
+  - export REPO=fineprint-global/mininglucc
+  - export TAG=`if [ "$TRAVIS_BRANCH" == "main" ]; then echo "latest"; else echo $TRAVIS_BRANCH ; fi` # Doesn't work
   - docker build -f Dockerfile -t $REPO:$COMMIT .
-  - docker tag $REPO:$COMMIT $REPO:latest
+  - docker tag $REPO:$COMMIT $REPO:$TAG
   - docker tag $REPO:$COMMIT $REPO:travis-$TRAVIS_BUILD_NUMBER
   - docker push $REPO
