@@ -9,6 +9,7 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+
 ## Read mining clusters 
 
 For details see [01-mining-clusters.Rmd]. 
@@ -21,88 +22,144 @@ mining_com <- sf::st_read(
   dsn = stringr::str_glue("{derived_data_path}/mining_commodities.gpkg"),
   fid_column_name = "FID_DATASET",
   stringsAsFactors = FALSE,
-  query = "SELECT geom, ISO3_CODE, COUNTRY_NAME, COMMODITES FROM mining_commodities") 
+  query = "SELECT ISO3_CODE, COMMODITES, STAGE, STATUS FROM mining_commodities") 
 
 mining_pol <- sf::st_read(
   dsn = stringr::str_glue("{derived_data_path}/global_mining_polygons_v1.gpkg"),
   fid_column_name = "FID_DATASET",
   stringsAsFactors = FALSE,
-  query = "SELECT geom, ISO3_CODE, COUNTRY_NAME, AREA FROM mining_polygons") %>% 
-  dplyr::mutate(DATASET = "polygons")
+  query = "SELECT ISO3_CODE, COUNTRY_NAME, AREA FROM mining_polygons") 
 
 mining_clusters <- sf::st_read(
-  dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/country_clusters.geojson"),
-  stringsAsFactors = FALSE)
+  dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/country_clusters.gpkg"),
+  stringsAsFactors = FALSE, 
+  query = "SELECT ID_CLUSTER, ISO3_CODE, FID_DATASET, DATASET FROM country_clusters") %>% 
+  tibble::as_tibble()
 
 ```
+We group the commodities according to [10.1038/s41467-020-17928-5](https://doi.org/10.1038/s41467-020-17928-5).
+
+```{r define-commodities-groups, echo=FALSE}
+
+critical_for_renewables_tbl <- tibble::tribble(
+  ~COMMODITY,               ~COMMODITY_GROUP,
+  "Gold",                   "Critical for renewables",
+  "Copper",                 "Critical for renewables",
+  "Silver",                 "Critical for renewables",
+  "Zinc",                   "Critical for renewables",
+  "Lead",                   "Critical for renewables",
+  "Iron Ore",               "Critical for renewables",
+  "Nickel",                 "Critical for renewables",
+  "Molybdenum",             "Critical for renewables",
+  "Cobalt",                 "Critical for renewables",
+  "Platinum",               "Critical for renewables",
+  "Palladium",              "Critical for renewables",
+  "Lithium",                "Critical for renewables",
+  "Tin",                    "Critical for renewables",
+  "Tungsten",               "Critical for renewables",
+  "Manganese",              "Critical for renewables",
+  "Graphite",               "Critical for renewables",
+  "Vanadium",               "Critical for renewables",
+  "Bauxite",                "Critical for renewables",
+  "Tantalum",               "Critical for renewables",
+  "Chromite",               "Critical for renewables",
+  "Antimony",               "Critical for renewables",
+  "Titanium",               "Critical for renewables",
+  "Niobium",                "Critical for renewables",
+  "Zircon",                 "Critical for renewables",
+  "Yttrium",                "Critical for renewables",
+  "Scandium",               "Critical for renewables",
+  "Chromium",               "Critical for renewables",
+  "Alumina",                "Critical for renewables",
+  "Aluminum",               "Critical for renewables",
+  "Platinum Group Metals",  "Critical for renewables",
+  "Coal",                   "Non-renewable energy",
+  "U3O8",                   "Not critical",
+  "Diamonds",               "Not critical",
+  "Phosphate",              "Not critical",
+  "Potash",                 "Not critical",
+  "Ilmenite",               "Not critical",
+  "Rutile",                 "Not critical",
+  "Borates",                "Not critical"
+)
+
+status_concordance_tbl <- tibble::tribble(
+  ~DEVELOPMENT_GROUP, ~DEVELOPMENT_STAGE,
+  "Operational",      "Preproduction",
+  "Operational",      "Construction Planned",
+  "Operational",      "Construction Started",
+  "Operational",      "Commissioning",
+  "Operational",      "Operating",
+  "Operational",      "Satellite",
+  "Operational",      "Expansion",
+  "Operational",      "Limited Production",
+  "Operational",      "Residual Production",
+  "Pre-operational",  "Grassroots",
+  "Pre-operational",  "Exploration",
+  "Pre-operational",  "Target Outline",
+  "Pre-operational",  "Reserves Development",
+  "Pre-operational",  "Advanced Exploration",
+  "Pre-operational",  "Prefeas/Scoping",
+  "Pre-operational",  "Feasibility",
+  "Pre-operational",  "Feasibility Started",
+  "Pre-operational",  "Feasibility Complete",
+  "Closed",           "Closed"
+)
+
+```
+
 
 ## Calculate mining area per clusters 
 
 ```{r cluster-area}
-cluster_area <- sf::st_drop_geometry(mining_clusters) %>% 
-  dplyr::filter(DATASET == "polygons") %>% 
+cluster_area <- dplyr::filter(mining_clusters, DATASET == "polygons") %>% 
   dplyr::select(FID_DATASET, ID_CLUSTER) %>% 
   dplyr::right_join(mining_pol, by = c("FID_DATASET" = "FID_DATASET")) %>% 
-  dplyr::select(-DATASET) %>% 
-  sf::st_as_sf() %>% 
   dplyr::group_by(ID_CLUSTER, ISO3_CODE, COUNTRY_NAME) %>% 
-  dplyr::summarise(AREA = sum(AREA), .groups = 'drop')
+  dplyr::summarise(N_POLYGONS = length(FID_DATASET),
+                   FID_POLYGONS = glue::glue_collapse(FID_DATASET, ","),
+                   AREA = sum(AREA), 
+                   .groups = 'drop')
 
-sf::st_write(cluster_area, 
-             delete_dsn = TRUE,
-             dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/cluster_area.geojson"))
-
-sf::st_write(cluster_area, 
-             delete_dsn = TRUE,
-             dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/cluster_area.gpkg"))
+readr::write_csv(cluster_area, file = stringr::str_glue("{derived_data_path}/{cluster_version}/cluster_area.csv"))
 ```
-
 
 ## Get mining commodities per clusters 
 
 ```{r cluster-commodity}
-system.time(cluster_com <- sf::st_drop_geometry(mining_clusters) %>% 
-  dplyr::filter(DATASET == "commodities") %>% 
+system.time(cluster_com <- dplyr::filter(mining_clusters, DATASET == "commodities") %>% 
   dplyr::select(FID_DATASET, ID_CLUSTER) %>% 
   dplyr::right_join(mining_com, by = c("FID_DATASET" = "FID_DATASET")) %>% 
-  sf::st_as_sf() %>% 
-  dplyr::group_by(ID_CLUSTER, ISO3_CODE, COUNTRY_NAME) %>% 
+  dplyr::group_by(ID_CLUSTER, ISO3_CODE) %>% 
   dplyr::summarise(
     COMMODITES = glue::glue_collapse(COMMODITES, ","),
     FID_DATASET = glue::glue_collapse(FID_DATASET, ","), 
     .groups = 'drop') %>% 
   tidyr::separate_rows(COMMODITES, sep = ",") %>% 
   tidyr::separate_rows(FID_DATASET, sep = ",") %>% 
-  dplyr::group_by(ID_CLUSTER, ISO3_CODE, COUNTRY_NAME) %>% 
+  dplyr::left_join(critical_for_renewables_tbl, by = c("COMMODITES" = "COMMODITY")) %>% 
+  dplyr::group_by(ID_CLUSTER, ISO3_CODE) %>% 
   dplyr::summarise(
     N_COMMODITES = length(unique(COMMODITES)),
+    N_COMMODITIY_GROUP = length(unique(COMMODITY_GROUP)),
     COMMODITES = glue::glue_collapse(unique(COMMODITES), ","),
-    FID_DATASET = glue::glue_collapse(unique(FID_DATASET), ","),
+    COMMODITY_GROUP = glue::glue_collapse(unique(COMMODITY_GROUP), ","),
+    FID_COMMODITES = glue::glue_collapse(unique(FID_DATASET), ","),
     .groups = 'drop'))
 
-sf::st_write(cluster_com, 
-             delete_dsn = TRUE,
-             dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/cluster_com.geojson"))
-
-sf::st_write(cluster_com, 
-             delete_dsn = TRUE,
-             dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/cluster_com.gpkg"))
+readr::write_csv(cluster_com, file = stringr::str_glue("{derived_data_path}/{cluster_version}/cluster_com.csv"))
 ```
 
-## Merge mining area and commodities
 
+
+## Mining area and commodities
 
 ```{r area-commodity}
-comm_area <- cluster_com %>% 
-  sf::st_drop_geometry() %>% 
-  dplyr::select(-COUNTRY_NAME) %>% 
-  dplyr::right_join(cluster_area, by = c("ID_CLUSTER" = "ID_CLUSTER", "ISO3_CODE" = "ISO3_CODE"))
-
-comm_area %>% 
+dplyr::left_join(cluster_area, cluster_com, by = c("ID_CLUSTER", "ISO3_CODE")) %>% 
   dplyr::group_by(COMMODITES) %>% 
   dplyr::summarise(AREA = sum(AREA)) %>% 
   dplyr::arrange(dplyr::desc(AREA)) %>% 
-  dplyr::filter(0.5 >= cumsum(AREA)/sum(AREA)) %>% 
+  dplyr::filter(0.5 >= cumsum(AREA)/sum(AREA)) %>%
   dplyr::mutate(COMMODITES = ifelse(is.na(COMMODITES), "Unknown", COMMODITES)) %>% 
   ggplot(aes(x = reorder(COMMODITES, desc(AREA)), y = AREA, fill = AREA)) + 
   geom_bar(stat = 'identity') + 
@@ -111,9 +168,26 @@ comm_area %>%
   theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
   labs(title = 'Commodities accounting for 50 % of the mining area', 
        x = 'Commodities',
-       y = 'Area [sqkm]') 
+       y = 'Area [sqkm]')
 ```
 
 
+## Mining area and commodity groups
+
+```{r area-commodity-group}
+dplyr::left_join(cluster_area, cluster_com, by = c("ID_CLUSTER", "ISO3_CODE")) %>% 
+  dplyr::group_by(COMMODITY_GROUP) %>% 
+  dplyr::summarise(AREA = sum(AREA)) %>% 
+  dplyr::arrange(dplyr::desc(AREA)) %>% 
+  dplyr::mutate(COMMODITY_GROUP = ifelse(is.na(COMMODITY_GROUP), "Unknown", COMMODITY_GROUP)) %>% 
+  ggplot(aes(x = reorder(COMMODITY_GROUP, desc(AREA)), y = AREA, fill = AREA)) + 
+  geom_bar(stat = 'identity') + 
+  coord_flip() +
+  scale_fill_viridis_c(direction = -1) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  labs(title = 'Mining area per commodity group', 
+       x = 'Commodity group',
+       y = 'Area [sqkm]') 
+```
 
 
