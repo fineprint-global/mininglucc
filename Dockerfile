@@ -28,3 +28,4 @@ RUN . /etc/environment \
 # build compendium package and render the scripts
 RUN R -e "devtools::install('/mininglucc', dep=TRUE)" \
   && R -e "rmarkdown::render('/mininglucc/analysis/00-data-preparation.Rmd')"
+  && R -e "rmarkdown::render('/mininglucc/analysis/01-mining-clusters.Rmd')"
