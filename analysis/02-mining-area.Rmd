@@ -15,7 +15,7 @@ For details see [01-mining-clusters.Rmd].
 
 ```{r read-data}
 derived_data_path <- here::here('analysis', 'data', 'derived_data')
-cluster_version <- "202011101718"
+cluster_version <- "202011102022"
 
 mining_com <- sf::st_read(
   dsn = stringr::str_glue("{derived_data_path}/mining_commodities.gpkg"),
@@ -32,6 +32,88 @@ mining_pol <- sf::st_read(
 
 mining_clusters <- sf::st_read(
   dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/country_clusters.geojson"),
-  stringsAsFactors = FALSE) 
-  
+  stringsAsFactors = FALSE)
+
 ```
+
+## Calculate mining area per clusters 
+
+```{r cluster-area}
+cluster_area <- sf::st_drop_geometry(mining_clusters) %>% 
+  dplyr::filter(DATASET == "polygons") %>% 
+  dplyr::select(FID_DATASET, ID_CLUSTER) %>% 
+  dplyr::right_join(mining_pol, by = c("FID_DATASET" = "FID_DATASET")) %>% 
+  dplyr::select(-DATASET) %>% 
+  sf::st_as_sf() %>% 
+  dplyr::group_by(ID_CLUSTER, ISO3_CODE, COUNTRY_NAME) %>% 
+  dplyr::summarise(AREA = sum(AREA), .groups = 'drop')
+
+sf::st_write(cluster_area, 
+             delete_dsn = TRUE,
+             dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/cluster_area.geojson"))
+
+sf::st_write(cluster_area, 
+             delete_dsn = TRUE,
+             dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/cluster_area.gpkg"))
+```
+
+
+## Get mining commodities per clusters 
+
+```{r cluster-commodity}
+system.time(cluster_com <- sf::st_drop_geometry(mining_clusters) %>% 
+  dplyr::filter(DATASET == "commodities") %>% 
+  dplyr::select(FID_DATASET, ID_CLUSTER) %>% 
+  dplyr::right_join(mining_com, by = c("FID_DATASET" = "FID_DATASET")) %>% 
+  sf::st_as_sf() %>% 
+  dplyr::group_by(ID_CLUSTER, ISO3_CODE, COUNTRY_NAME) %>% 
+  dplyr::summarise(
+    COMMODITES = glue::glue_collapse(COMMODITES, ","),
+    FID_DATASET = glue::glue_collapse(FID_DATASET, ","), 
+    .groups = 'drop') %>% 
+  tidyr::separate_rows(COMMODITES, sep = ",") %>% 
+  tidyr::separate_rows(FID_DATASET, sep = ",") %>% 
+  dplyr::group_by(ID_CLUSTER, ISO3_CODE, COUNTRY_NAME) %>% 
+  dplyr::summarise(
+    N_COMMODITES = length(unique(COMMODITES)),
+    COMMODITES = glue::glue_collapse(unique(COMMODITES), ","),
+    FID_DATASET = glue::glue_collapse(unique(FID_DATASET), ","),
+    .groups = 'drop'))
+
+sf::st_write(cluster_com, 
+             delete_dsn = TRUE,
+             dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/cluster_com.geojson"))
+
+sf::st_write(cluster_com, 
+             delete_dsn = TRUE,
+             dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/cluster_com.gpkg"))
+```
+
+## Merge mining area and commodities
+
+
+```{r area-commodity}
+comm_area <- cluster_com %>% 
+  sf::st_drop_geometry() %>% 
+  dplyr::select(-COUNTRY_NAME) %>% 
+  dplyr::right_join(cluster_area, by = c("ID_CLUSTER" = "ID_CLUSTER", "ISO3_CODE" = "ISO3_CODE"))
+
+comm_area %>% 
+  dplyr::group_by(COMMODITES) %>% 
+  dplyr::summarise(AREA = sum(AREA)) %>% 
+  dplyr::arrange(dplyr::desc(AREA)) %>% 
+  dplyr::filter(0.5 >= cumsum(AREA)/sum(AREA)) %>% 
+  dplyr::mutate(COMMODITES = ifelse(is.na(COMMODITES), "Unknown", COMMODITES)) %>% 
+  ggplot(aes(x = reorder(COMMODITES, desc(AREA)), y = AREA, fill = AREA)) + 
+  geom_bar(stat = 'identity') + 
+  coord_flip() +
+  scale_fill_viridis_c(direction = -1) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  labs(title = 'Commodities accounting for 50 % of the mining area', 
+       x = 'Commodities',
+       y = 'Area [sqkm]') 
+```
+
+
+
+
