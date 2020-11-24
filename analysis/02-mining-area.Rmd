@@ -6,6 +6,15 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
+library(mininglucc)
+library(ggplot2)
+library(viridis)
+library(magrittr)
+library(progress)
+library(parallel)
+library(forcats)
+library(dplyr)
+library(sf)
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
@@ -28,14 +37,13 @@ mining_pol <- sf::st_read(
   dsn = stringr::str_glue("{derived_data_path}/global_mining_polygons_v1.gpkg"),
   fid_column_name = "FID_DATASET",
   stringsAsFactors = FALSE,
-  query = "SELECT ISO3_CODE, COUNTRY_NAME, AREA FROM mining_polygons") 
+  query = "SELECT ISO3_CODE, COUNTRY_NAME, AREA, geom FROM mining_polygons") 
 
-mining_clusters <- sf::st_read(
-  dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/country_clusters.gpkg"),
+country_clusters <- sf::st_read(
+  dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/country_dbclusters.gpkg"),
   stringsAsFactors = FALSE, 
   query = "SELECT ID_CLUSTER, ISO3_CODE, FID_DATASET, DATASET FROM country_clusters") %>% 
   tibble::as_tibble()
-
 ```
 We group the commodities according to [10.1038/s41467-020-17928-5](https://doi.org/10.1038/s41467-020-17928-5).
 
@@ -112,10 +120,10 @@ status_concordance_tbl <- tibble::tribble(
 ## Calculate mining area per clusters 
 
 ```{r cluster-area}
-cluster_area <- dplyr::filter(mining_clusters, DATASET == "polygons") %>% 
+cluster_area <- dplyr::filter(country_clusters, DATASET == "polygons") %>% 
   dplyr::select(FID_DATASET, ID_CLUSTER) %>% 
-  dplyr::right_join(mining_pol, by = c("FID_DATASET" = "FID_DATASET")) %>% 
-  dplyr::group_by(ID_CLUSTER, ISO3_CODE, COUNTRY_NAME) %>% 
+  dplyr::right_join(sf::st_drop_geometry(mining_pol), by = c("FID_DATASET" = "FID_DATASET")) %>% 
+  dplyr::group_by(ID_CLUSTER, ISO3_CODE) %>% 
   dplyr::summarise(N_POLYGONS = length(FID_DATASET),
                    FID_POLYGONS = glue::glue_collapse(FID_DATASET, ","),
                    AREA = sum(AREA), 
@@ -127,10 +135,14 @@ readr::write_csv(cluster_area, file = stringr::str_glue("{derived_data_path}/{cl
 ## Get mining commodities per clusters 
 
 ```{r cluster-commodity}
-system.time(cluster_com <- dplyr::filter(mining_clusters, DATASET == "commodities") %>% 
+cluster_com_path <- stringr::str_glue("{derived_data_path}/{cluster_version}/cluster_com.csv")
+if(file.exists(cluster_com_path)){
+  cluster_com <- readr::read_csv(cluster_com_path)
+} else {
+system.time(cluster_com <- dplyr::filter(country_clusters, DATASET == "commodities") %>% 
   dplyr::select(FID_DATASET, ID_CLUSTER) %>% 
   dplyr::right_join(mining_com, by = c("FID_DATASET" = "FID_DATASET")) %>% 
-  dplyr::group_by(ID_CLUSTER, ISO3_CODE) %>% 
+  dplyr::group_by(ISO3_CODE, ID_CLUSTER) %>% 
   dplyr::summarise(
     COMMODITES = glue::glue_collapse(COMMODITES, ","),
     FID_DATASET = glue::glue_collapse(FID_DATASET, ","), 
@@ -146,8 +158,25 @@ system.time(cluster_com <- dplyr::filter(mining_clusters, DATASET == "commoditie
     COMMODITY_GROUP = glue::glue_collapse(unique(COMMODITY_GROUP), ","),
     FID_COMMODITES = glue::glue_collapse(unique(FID_DATASET), ","),
     .groups = 'drop'))
+  readr::write_csv(cluster_com, file = cluster_com_path)
+}
 
-readr::write_csv(cluster_com, file = stringr::str_glue("{derived_data_path}/{cluster_version}/cluster_com.csv"))
+```
+
+
+```{r clusters-to-multipolygons}
+mining_clusters <- dplyr::filter(country_clusters, DATASET == 'polygons') %>% 
+  dplyr::left_join(mining_pol, ., by = c("FID_DATASET", "ISO3_CODE")) %>% 
+  dplyr::group_by(ISO3_CODE, COUNTRY_NAME, ID_CLUSTER) %>% 
+  dplyr::summarise(AREA = sum(AREA, na.rm = TRUE), .groups = 'drop') %>% 
+  dplyr::left_join(cluster_com, by = c("ID_CLUSTER", "ISO3_CODE"))
+
+sf::st_write(mining_clusters, 
+             dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/mining_clusters.gpkg"),
+             delete_dsn = TRUE)
+sf::st_write(mining_clusters, 
+             dsn = stringr::str_glue("{derived_data_path}/{cluster_version}/mining_clusters.geojson"),
+             delete_dsn = TRUE)
 ```
 
 
@@ -155,8 +184,7 @@ readr::write_csv(cluster_com, file = stringr::str_glue("{derived_data_path}/{clu
 ## Mining area and commodities
 
 ```{r area-commodity}
-dplyr::left_join(cluster_area, cluster_com, by = c("ID_CLUSTER", "ISO3_CODE")) %>% 
-  dplyr::group_by(COMMODITES) %>% 
+dplyr::group_by(mining_clusters, COMMODITES) %>% 
   dplyr::summarise(AREA = sum(AREA)) %>% 
   dplyr::arrange(dplyr::desc(AREA)) %>% 
   dplyr::filter(0.5 >= cumsum(AREA)/sum(AREA)) %>%
@@ -175,9 +203,8 @@ dplyr::left_join(cluster_area, cluster_com, by = c("ID_CLUSTER", "ISO3_CODE")) %
 ## Mining area and commodity groups
 
 ```{r area-commodity-group}
-dplyr::left_join(cluster_area, cluster_com, by = c("ID_CLUSTER", "ISO3_CODE")) %>% 
-  dplyr::group_by(COMMODITY_GROUP) %>% 
-  dplyr::summarise(AREA = sum(AREA)) %>% 
+dplyr::group_by(mining_clusters, COMMODITY_GROUP) %>% 
+  dplyr::summarise(AREA = sum(AREA), .grous = 'drop') %>% 
   dplyr::arrange(dplyr::desc(AREA)) %>% 
   dplyr::mutate(COMMODITY_GROUP = ifelse(is.na(COMMODITY_GROUP), "Unknown", COMMODITY_GROUP)) %>% 
   ggplot(aes(x = reorder(COMMODITY_GROUP, desc(AREA)), y = AREA, fill = AREA)) + 
@@ -187,7 +214,36 @@ dplyr::left_join(cluster_area, cluster_com, by = c("ID_CLUSTER", "ISO3_CODE")) %
   theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
   labs(title = 'Mining area per commodity group', 
        x = 'Commodity group',
-       y = 'Area [sqkm]') 
+       y = 'Area [sqkm]')
+```
+
+
+## Mining area and single commodity
+
+```{r area-commodity-group}
+sf::st_drop_geometry(mining_clusters) %>%  
+  tibble::as_tibble() %>% 
+  dplyr::mutate(COMPANIONALITY = factor(N_COMMODITES == 1, c(T, F), c("Single host", "Companion"))) %>% 
+  dplyr::mutate(COMPANIONALITY = forcats::fct_reorder(COMPANIONALITY, desc(COMPANIONALITY))) %>% 
+  tidyr::separate_rows(COMMODITES, sep = ",") %>% 
+  dplyr::filter(!is.na(COMMODITES)) %>% 
+  group_by(COMMODITES, COMPANIONALITY) %>% 
+  dplyr::summarise(AREA = sum(AREA), .groups = 'drop') %>% 
+  dplyr::group_by(COMMODITES) %>% 
+  dplyr::mutate(COMPANIONALITY_SUM = sum(AREA)) %>%
+  dplyr::ungroup() %>% 
+  dplyr::arrange(dplyr::desc(COMPANIONALITY_SUM), COMPANIONALITY) %>% 
+  dplyr::filter(0.85 >= cumsum(AREA)/sum(AREA)) %>%
+  dplyr::arrange(dplyr::desc(AREA)) %>% 
+  ggplot(aes(x = reorder(COMMODITES, desc(COMPANIONALITY_SUM)), y = AREA, fill = COMPANIONALITY)) +
+  geom_bar(stat = 'identity', position = 'stack') +
+  coord_flip() +
+  # scale_fill_viridis_d(direction = -1, begin = 0.3, end = 0.6) +
+  viridis::scale_fill_viridis(discrete = T, option = "E", begin = 0.8, end = 0.3) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = 'Commodities accounting for 85 % of the mining area',
+       x = 'Commodity',
+       y = 'Area [sqkm]')
 ```
 
 
