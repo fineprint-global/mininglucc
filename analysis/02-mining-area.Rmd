@@ -211,7 +211,8 @@ dplyr::group_by(mining_clusters, COMMODITY_GROUP) %>%
   geom_bar(stat = 'identity') + 
   coord_flip() +
   scale_fill_viridis_c(direction = -1) + 
-  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  theme(axis.text.x = element_text(angle = 0, hjust = 1)) + 
+  scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3, accuracy = 1)) + 
   labs(title = 'Mining area per commodity group', 
        x = 'Commodity group',
        y = 'Area [sqkm]')
@@ -220,7 +221,13 @@ dplyr::group_by(mining_clusters, COMMODITY_GROUP) %>%
 
 ## Mining area and single commodity
 
-```{r area-commodity-group}
+The graph below shows how much area is used per commodity, divided into single host area 
+and area as a companion, i.e., mined together with other commodities in the same spatial cluster. 
+Here companion, refers to materials extracted in the same spatial cluster. 
+Note that the companion area has multiple counts, for example the companion area 
+of coal is also counted by its companion materials. 
+
+```{r area-double-counting}
 sf::st_drop_geometry(mining_clusters) %>%  
   tibble::as_tibble() %>% 
   dplyr::mutate(COMPANIONALITY = factor(N_COMMODITES == 1, c(T, F), c("Single host", "Companion"))) %>% 
@@ -240,10 +247,12 @@ sf::st_drop_geometry(mining_clusters) %>%
   coord_flip() +
   # scale_fill_viridis_d(direction = -1, begin = 0.3, end = 0.6) +
   viridis::scale_fill_viridis(discrete = T, option = "E", begin = 0.8, end = 0.3) +
+  scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3, accuracy = 1)) +
   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
   labs(title = 'Commodities accounting for 85 % of the mining area',
        x = 'Commodity',
-       y = 'Area [sqkm]')
+       y = 'Area [sqkm]') +
+  guides(fill = guide_legend(title="Spatial cluster type"))
 ```
 
 
