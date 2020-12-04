@@ -11,6 +11,7 @@ library(parallel)
 library(ggplot2)
 library(dplyr)
 library(sf)
+library(parallel)
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
@@ -27,6 +28,7 @@ dir.create(derived_data_path, showWarnings = FALSE, recursive = TRUE)
 ```
 
 
+
 ## Global mining areas
 
 For mining areas we use the mining polygons data set available from [10.1594/PANGAEA.910894](https://doi.org/10.1594/PANGAEA.910894). This data set is described here [10.1038/s41597-020-00624-w](https://doi.org/10.1038/s41597-020-00624-w). The polygons cover the entire globe. 
@@ -41,7 +43,7 @@ mining_pol <- sf::st_read(
   dsn = stringr::str_glue("{derived_data_path}/global_mining_polygons_v1.gpkg"),
   fid_column_name = "FID",
   stringsAsFactors = FALSE,
-  query = "SELECT geom, ISO3_CODE, COUNTRY_NAME, AREA FROM mining_polygons") 
+  query = "SELECT geom, ISO3_CODE, COUNTRY_NAME, AREA FROM mining_polygons")
 
 mining_pol %>% 
   sf::st_drop_geometry() %>% 
@@ -53,6 +55,7 @@ mining_pol %>%
   geom_bar(stat = 'identity') + 
   scale_fill_viridis_c(direction = -1) + 
   theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3, accuracy = 1)) +
   labs(title = 'Countries accounting for 95 % of the mining area', 
        x = 'Country',
        y = 'Area [sqkm]') 
@@ -97,4 +100,51 @@ mining_com <- sf::st_read(
 
 mining_com
 ```
+
+
+## Ecoregions 
+
+Get information on Ecoregions and Biomes by spatial intersection. 
+```{r get-ecoregions}
+eco_data_path <- stringr::str_glue("{derived_data_path}/ecoregions2017.gpkg")
+if( !file.exists(eco_data_path) ){
+  
+  download.file(url = "https://storage.googleapis.com/teow2016/Ecoregions2017.zip", 
+                destfile = stringr::str_glue("{raw_data_path}/ecoregions2017.zip"))  
+  
+  unzip(zipfile = stringr::str_glue("{raw_data_path}/ecoregions2017.zip"), 
+        overwrite = TRUE, exdir = raw_data_path)
+  
+  ecoregions <- sf::st_read(dsn = stringr::str_glue("{raw_data_path}/Ecoregions2017.shp"), 
+              stringsAsFactors = FALSE) %>% 
+    dplyr::rename(ID_ECO = ECO_ID, geom = geometry) 
+  
+  aux <- suppressWarnings(split(ecoregions, ecoregions$ID_ECO)) %>%
+    parallel::mclapply(mc.cores = parallel::detectCores(), 
+                       FUN = function(x) sf::st_make_valid(x) %>% sf::st_simplify()) %>% 
+    do.call("rbind", .) %>% 
+    sf::st_write(layer = "ecoregions", dsn = eco_data_path, delete_dsn = TRUE)
+  
+}
+
+ecoregions <- sf::st_read(dsn = eco_data_path, 
+                          query = "SELECT ID_ECO, geom FROM ecoregions") %>% 
+  sf::st_cast("POLYGON") # Casting to polygons makes the intersects much faster
+
+system.time(
+  mining_env_extent <- sf::st_join( mining_pol,
+                                    y = ecoregions,
+                                    join = sf::st_intersects,
+                                    largest = TRUE,
+                                    left = TRUE)
+)
+
+mining_env_extent %>% 
+  sf::st_drop_geometry() %>% 
+  tibble::as_tibble() %>% 
+  dplyr::select(FID_POL = FID, ID_ECO) %>% 
+  readr::write_csv(stringr::str_glue("{derived_data_path}/ecoregion_ids.csv"))
+```
+
+
 
