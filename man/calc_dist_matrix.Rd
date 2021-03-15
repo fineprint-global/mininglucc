@@ -4,11 +4,12 @@
 \alias{calc_dist_matrix}
 \title{Calculate distance matrix in parallel}
 \usage{
-calc_dist_matrix(x, output_dir = ".", pb = NULL)
+calc_dist_matrix(x, split_att, output_dir = ".", pb = NULL)
 }
 \arguments{
-\item{x}{simple feature object including at least one column called
-\code{ISO3_CODE}. See \code{?sf}}
+\item{x}{simple feature object. See \code{?sf}}
+
+\item{split_att}{attribute name (column) from \code{x} to use as file name.}
 
 \item{output_dir}{path to store distance matrix RDS files.
 Default is work dir}

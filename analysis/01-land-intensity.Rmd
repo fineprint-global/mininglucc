@@ -1,0 +1,265 @@
+---
+title: "Mining land use"
+author: "Victor Maus"
+date: "3/8/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(parallel)
+library(stringr)
+library(here)
+library(sf)
+library(viridis)
+library(rnaturalearth)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load tables
+
+```{r load-tables}
+version <- "20210311"
+cluster_type <- "hcluster"
+derived_data_path <- here::here('data', 'derived_data', version)
+derived_tables_path <- here::here(derived_data_path, 'tables')
+
+# Mine clusters 
+properties_clusters <- here::here(derived_tables_path, glue::glue("mine_properties_",cluster_type,".geojson")) %>% 
+  sf::st_read()
+polygons_clusters <- here::here(derived_tables_path, glue::glue("mine_polygons_",cluster_type,".geojson")) %>% 
+  sf::st_read()
+
+# Mine extraction 
+production_clusters <- here::here(derived_tables_path, glue::glue("mine_production_",cluster_type,".csv")) %>% 
+  readr::read_csv()
+ore_processed_clusters <- here::here(derived_tables_path, glue::glue("mine_ore_processed_",cluster_type,".csv")) %>%
+  readr::read_csv()
+
+# Environmental extensions
+ecoregions <- readr::read_csv(here::here(derived_tables_path, glue::glue("land_cover_extensions_",cluster_type,".csv")))
+```
+
+## Mining properties X Development stage  
+```{r properties-operation-stage}
+properties_clusters %>%
+  sf::st_drop_geometry() %>% 
+  dplyr::group_by(development_group) %>% 
+  dplyr::summarise(n = n()) %>% 
+  dplyr::mutate(perc = n/sum(n)*100) 
+```
+
+## Polygons cluster X Development stage  
+```{r polygons-operation-stage}
+polygons_clusters %>% 
+  sf::st_drop_geometry() %>%
+  tibble::as_tibble() %>% 
+  dplyr::left_join(sf::st_drop_geometry(properties_clusters), by = c("hcluster_id" = "hcluster_id")) %>% 
+  dplyr::mutate(development_group = ifelse(is.na(development_group), "Unknown", development_group)) %>% 
+  dplyr::group_by(development_group) %>% 
+  dplyr::summarise(n = n(), area = sum(area)) %>% 
+  dplyr::mutate(n.perc = n/sum(n)*100, area.perc = area/sum(area)*100) 
+```
+
+*Notes:*
+  - 240 (8.44%) from the polygons clusters identified in the satellite images are tagged pre-operational near to mining properties. This may indicate out-of-date information in the mining properties database. 
+  - 308 (10.8%) of the polygons clusters were not linked to any mining property. In terms of area only 2,652 mk^2 (4.63%) were not linked to any mining property.
+  - 115 (4.05%) from polygons clusters are closed. In terms of area only closed mines accounts only for 1.09%. This could indicate a bias in the mapping as closed area may have vegetation regeneration, which make identification more difficult. 
+  - 89% of the polygons area is operational. Meaning that this areas may still expand in the near future and could be monitored from satellite. 
+
+## Polygons cluster X commodities
+```{r polygons-renewables}
+polygons_clusters %>% 
+  sf::st_drop_geometry() %>%
+  tibble::as_tibble() %>% 
+  dplyr::left_join(sf::st_drop_geometry(properties_clusters), by = c("hcluster_id" = "hcluster_id")) %>% 
+  dplyr::mutate(commodities_list = ifelse(is.na(commodities_list), "Unknown", commodities_list)) %>% 
+  dplyr::group_by(commodities_list) %>% 
+  dplyr::summarise(n = n(), area = sum(area)) %>% 
+  dplyr::mutate(n.perc = n/sum(n)*100, area.perc = area/sum(area)*100) %>% 
+  dplyr::arrange(desc(area.perc)) %>% 
+  dplyr::filter(cumsum(area.perc)<50)
+```
+
+## Commodity X Area (Muiti-counting)
+```{r area-double-counting}
+polygons_clusters %>% 
+  sf::st_drop_geometry() %>%
+  tibble::as_tibble() %>% 
+  dplyr::left_join(sf::st_drop_geometry(properties_clusters), by = c("hcluster_id" = "hcluster_id")) %>% 
+  dplyr::filter(!is.na(commodities_list)) %>% 
+  dplyr::mutate(companionality = factor(stringr::str_detect(commodities_list, ","), c(T, F), c("Companion", "Single host"))) %>% 
+  tidyr::separate_rows(commodities_list, sep = ",") %>% 
+  dplyr::filter(commodities_list != "NA") %>% 
+  group_by(commodities_list, companionality) %>% 
+  dplyr::summarise(area = sum(area), .groups = 'drop') %>% 
+  dplyr::group_by(commodities_list) %>% 
+  dplyr::mutate(companionality_sum = sum(area)) %>%
+  dplyr::ungroup() %>% 
+  dplyr::arrange(dplyr::desc(companionality_sum), companionality) %>% 
+  dplyr::filter(0.95 >= cumsum(area)/sum(area)) %>%
+  dplyr::arrange(dplyr::desc(area)) %>% 
+  ggplot(aes(x = reorder(commodities_list, companionality_sum), y = area, fill = companionality)) +
+    geom_bar(stat = 'identity', position = 'stack') +
+    coord_flip() +
+    viridis::scale_fill_viridis(discrete = T, option = "E", begin = 0.8, end = 0.3) +
+    scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3, accuracy = 1)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    labs(title = 'Commodities accounting for 95 % of the mining area',
+       x = 'Commodity',
+       y = 'Area [sqkm]') +
+   guides(fill = guide_legend(title="Spatial cluster type"))
+```
+
+## Commodity (production-allocated) X Area 
+```{r area-allocated-commodity-production}
+production_clusters %>% 
+  dplyr::filter(2000 <= year, year <= 2019) %>% 
+  dplyr::group_by(hcluster_id, commodity_name) %>% 
+  dplyr::summarise(quantity = sum(quantity, na.rm = TRUE), quantity_unit = unique(quantity_unit), .groups = 'drop') %>% 
+  dplyr::right_join(sf::st_drop_geometry(polygons_clusters), by = c("hcluster_id" = "hcluster_id")) %>% 
+  dplyr::group_by(hcluster_id) %>% 
+  dplyr::filter(commodity_name != "NA") %>% 
+  dplyr::mutate(area = quantity/sum(quantity, na.rm = TRUE) * sum(area, na.rm = TRUE)) %>%
+  dplyr::ungroup() %>% 
+  dplyr::group_by(commodity_name) %>% 
+  dplyr::summarise(area = sum(area, na.rm = TRUE), .groups = 'drop') %>% 
+  dplyr::arrange(dplyr::desc(area)) %>% 
+  dplyr::arrange(dplyr::desc(area)) %>% 
+  ggplot(aes(x = reorder(commodity_name, area), y = area)) +
+    geom_bar(stat = 'identity', position = 'stack') +
+    coord_flip() +
+    viridis::scale_fill_viridis(discrete = T, option = "E", begin = 0.8, end = 0.3) +
+    scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3, accuracy = 1)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    labs(title = 'Commodities accounting for 95 % of the mining area',
+       x = 'Commodity',
+       y = 'Area [sqkm]') +
+   guides(fill = guide_legend(title="Spatial cluster type"))
+```
+
+
+## Commodity (production-allocated-split-companion) X Area 
+```{r area-allocated-commodity-production-companion}
+area_intensity_clusters <- production_clusters %>% 
+  dplyr::filter(2000 <= year, year <= 2019) %>% 
+  dplyr::group_by(hcluster_id, commodity_name) %>% 
+  # Mass of each commodity produced per cluster 
+  dplyr::summarise(quantity = sum(quantity, na.rm = TRUE), quantity_unit = unique(quantity_unit), .groups = 'drop') %>% 
+  dplyr::right_join(sf::st_drop_geometry(polygons_clusters), by = c("hcluster_id" = "hcluster_id")) %>% 
+  dplyr::filter(!is.na(commodity_name), !commodity_name %in% c("NA", "", "Na", "na")) %>% 
+  dplyr::group_by(hcluster_id) %>% 
+  # Allocate area proportionally to the mass of each commodity produced per cluster 
+  dplyr::mutate(area = quantity/sum(quantity, na.rm = TRUE) * sum(area, na.rm = TRUE),
+                area_intensity = area / quantity,
+                companion = factor(length(unique(commodity_name))>1, c(T, F), c("Companion", "Single host"))) %>% 
+  dplyr::ungroup()  
+  
+area_intensity_clusters %>% 
+  dplyr::group_by(commodity_name, companion) %>% 
+  dplyr::summarise(area = sum(area, na.rm = TRUE), .groups = 'drop') %>% 
+  dplyr::arrange(dplyr::desc(area)) %>% 
+  ggplot(aes(x = reorder(commodity_name, area), y = area, fill = companion)) +
+    geom_bar(stat = 'identity', position = 'stack') +
+    coord_flip() +
+    viridis::scale_fill_viridis(discrete = T, option = "E", begin = 0.8, end = 0.3) +
+    scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3, accuracy = 1)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    labs(title = 'Land area allocated to the commodities using production mass',
+       x = 'Commodity',
+       y = 'Area [sqkm]') +
+   guides(fill = guide_legend(title="Spatial cluster type"))
+```
+
+## Land intensity table
+```{r scater-production-area}
+area_intensity_clusters %>% 
+  ggplot(aes(x = quantity, y = area)) + 
+  geom_point(size = 0.3) + 
+  geom_smooth(method="lm") +
+  facet_wrap(~commodity_name, scales = "free")
+```
+
+### Scarter plot production x area 
+```{r scater-production-area}
+area_intensity_clusters %>% 
+  ggplot(aes(x = quantity, y = area)) + 
+  geom_point(size = 0.3) + 
+  geom_smooth(method="lm") +
+  facet_wrap(~commodity_name, scales = "free")
+```
+*Note:* Several commodities show a nearly horizontal "flat" regression line, i.e. the same size of area can have very different reported production. This indicate that the same mineral could have different impacts in differences regions. 
+
+## Are there significant difference in the land intensity among Biomes? 
+```{r anova}
+coal <- dplyr::left_join(ecoregions, area_intensity_clusters) %>% 
+  dplyr::filter(commodity_name == "Coal") %>% 
+  dplyr::mutate(biome_name = factor(biome_name),
+                biome_group = factor(biome_group),
+                log_area_intensity = log10(area_intensity))
+
+shapiro.test(coal$area_intensity)
+shapiro.test(coal$log_area_intensity)
+
+ggplot(data = coal, aes(x = area_intensity)) + 
+  geom_density(fill = "grey")
+ggplot(data = coal, aes(x = log_area_intensity)) + 
+  geom_density(fill = "grey")
+
+boxplot(area_intensity ~ biome_group, data = coal, ylab = "Area intensity", main = "Boxplots of mining area intensity")
+boxplot(area ~ biome_group, data = coal, ylab = "Area", main = "Boxplots of mining area")
+
+aov.out = aov(area_intensity ~ biome_group, data = coal)
+summary(aov.out)
+TukeyHSD(aov.out)
+plot(aov.out)
+```
+
+## Commodity (production-allocated-split-companion) X Biome area 
+```{r allocated-commodity-production-to-biome-area}
+production_clusters %>% 
+  dplyr::filter(2000 <= year, year <= 2019) %>% 
+  dplyr::group_by(hcluster_id, commodity_name) %>% 
+  # Mass of each commodity produced per cluster 
+  dplyr::summarise(quantity = sum(quantity, na.rm = TRUE), quantity_unit = unique(quantity_unit), .groups = 'drop') %>% 
+  dplyr::right_join(sf::st_drop_geometry(polygons_clusters), by = c("hcluster_id" = "hcluster_id")) %>% 
+  dplyr::filter(!commodity_name %in% c("NA", "", "Na", "na")) %>% 
+  dplyr::group_by(hcluster_id) %>% 
+  # Allocate area proportionally to the mass of each commodity produced per cluster 
+  dplyr::mutate(area = quantity/sum(quantity, na.rm = TRUE) * sum(area, na.rm = TRUE)) %>%
+  dplyr::ungroup() %>% 
+  dplyr::group_by(hcluster_id, commodity_name) %>%
+  
+  dplyr::group_by(commodity_name, companion) %>% 
+  dplyr::summarise(area = sum(area, na.rm = TRUE), .groups = 'drop') %>% 
+  dplyr::arrange(dplyr::desc(area)) %>% 
+  ggplot(aes(x = reorder(commodity_name, area), y = area, fill = companion)) +
+    geom_bar(stat = 'identity', position = 'stack') +
+    coord_flip() +
+    viridis::scale_fill_viridis(discrete = T, option = "E", begin = 0.8, end = 0.3) +
+    scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3, accuracy = 1)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    labs(title = 'Commodities accounting for 95 % of the mining area',
+       x = 'Commodity',
+       y = 'Area [sqkm]') +
+   guides(fill = guide_legend(title="Spatial cluster type"))
+```
+
+
+
+<!-- ## Land use X Ore processed -->
+<!-- ```{r polygons-renewables} -->
+<!-- ore_processed_clusters %>%  -->
+<!--   dplyr::group_by(hcluster_id) %>%  -->
+<!--   dplyr::summarise(quantity = sum(quantity, na.rm = TRUE), quantity_unit = unique(quantity_unit)) %>%  -->
+<!--   dplyr::right_join(sf::st_drop_geometry(polygons_clusters), by = c("hcluster_id" = "hcluster_id")) %>%  -->
+<!--   dplyr::group_by(commodities_list) %>%  -->
+<!--   dplyr::summarise(n = n(), area = sum(area)) %>%  -->
+<!--   dplyr::mutate(n.perc = n/sum(n)*100, area.perc = area/sum(area)*100) %>%  -->
+<!--   dplyr::arrange(desc(area.perc)) %>%  -->
+<!--   dplyr::filter(cumsum(area.perc)<50) -->
+<!-- ``` -->
+
+

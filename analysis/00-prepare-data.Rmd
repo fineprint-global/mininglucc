@@ -1,0 +1,413 @@
+---
+title: "Prepare data"
+author: "Victor Maus"
+date: "3/3/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(pangaear)
+library(tidyverse)
+library(stringr)
+library(here)
+library(sf)
+library(parallel)
+library(fastcluster)
+library(dbscan)
+library(progress)
+library(purrr)
+library(lwgeom)
+library(glue)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r data-dir}
+version <- "20210311"
+raw_data_path <- here::here('analysis', 'data', 'raw_data')
+derived_data_path <- here::here('analysis', 'data', 'derived_data', version)
+derived_tables_path <- here::here(derived_data_path, 'tables')
+dir.create(raw_data_path, showWarnings = FALSE, recursive = TRUE)
+dir.create(derived_data_path, showWarnings = FALSE, recursive = TRUE)
+dir.create(derived_tables_path, showWarnings = FALSE, recursive = TRUE)
+```
+
+
+## Download Ecoregions  
+```{r add-ecoregions}
+if(!file.exists(glue::glue(raw_data_path, "/Ecoregions2017.zip"))){
+  to <- getOption('timeout')
+  options(timeout=600)
+  download.file(url = "https://storage.googleapis.com/teow2016/Ecoregions2017.zip", 
+              destfile = glue::glue(raw_data_path, "/Ecoregions2017.zip"))
+  options(timeout=to)
+  unzip(zipfile = glue::glue(raw_data_path, "/Ecoregions2017.zip"), 
+      overwrite = TRUE, 
+      exdir = raw_data_path)
+}
+ecoregions <- sf::st_read(glue::glue(raw_data_path, "/Ecoregions2017.shp")) %>% 
+  dplyr::transmute(biome_name = BIOME_NAME,
+                   biome_code = BIOME_NUM,
+                   eco_name = ECO_NAME,
+                   eco_code = ECO_ID)
+```
+
+
+## Global mining areas
+
+For mining areas we use the mining polygons data set available from [10.1594/PANGAEA.910894](https://doi.org/10.1594/PANGAEA.910894). This data set is described here [10.1038/s41597-020-00624-w](https://doi.org/10.1038/s41597-020-00624-w). The polygons cover the entire globe. 
+```{r get-mining-polygons}
+pg_record <- pangaear::pg_data(doi = "10.1594/PANGAEA.910894", overwrite = TRUE, mssgs = TRUE)
+unzip(zipfile = pg_record[[1]]$path, 
+      files = "global_mining_polygons_v1.gpkg", 
+      overwrite = TRUE, 
+      exdir = raw_data_path)
+mining_pol <- sf::st_read(glue::glue(raw_data_path,"/global_mining_polygons_v1.gpkg"), fid_column_name = "fid") %>% 
+    dplyr::transmute(id = stringr::str_pad(as.hexmode(fid), pad = "0", 20), 
+                     area = AREA,
+                     country_name = COUNTRY_NAME,
+                     country_isoa3 = ISO3_CODE, 
+                     geometry = geom)
+```
+
+## Add biomes as attributes of mining polygons
+```{r biomes-tables}
+nc <- parallel::detectCores()
+nr <- nrow(mining_pol)
+mining_pol_eco <- mining_pol %>% 
+  split(., rep(1:ceiling(nr/nc), each=nc, length.out=nr)) %>% 
+  parallel::mclapply(mc.cores = nc, FUN = sf::st_join, left = TRUE, y = ecoregions, join = sf::st_nearest_feature) %>% 
+  dplyr::bind_rows()
+
+land_cover_extensions <- mines_gee %>%
+  dplyr::select(id = id, id_polygon = id, biome_name, biome_code, eco_name, eco_code) %>%
+  sf::st_drop_geometry() %>%
+  tibble::as_tibble()
+
+readr::write_csv(land_cover_extensions, here::here(derived_tables_path, "land_cover_extensions.csv"))
+```
+
+## Calculate distance matrix per country
+
+In this step we calculate the distances among all mining features in meters. 
+The results are saved to the `output_dir` per each country. 
+
+```{r fun-parallel-dist-matrix}
+mine_properties <- here::here(raw_data_path, "mining_commodities.gpkg") %>% 
+  sf::st_read(stringsAsFactors = FALSE) %>% 
+  dplyr::left_join(readr::read_csv(here::here(raw_data_path, "snl_isoa3_country_tbl.csv")), 
+                   by = c("country" = "snl_country")) %>% 
+  dplyr::mutate(id = str_pad(as.hexmode(snl_id), pad = "0", 20)) %>% 
+  dplyr::select(id, mine_name = mine, known_as, commodities_list = list_of_commodities,
+  development_stage, operating_status, country_name = COUNTRY_NAME, country_isoa3 = ISO3_CODE, geometry = geom)
+
+mine_polygons <- mines_gee %>% 
+  dplyr::transmute(dataset_id = id, dataset_name = "polygons", country_isoa3 = country_isoa3) 
+
+mine_points <- mine_properties %>% 
+  dplyr::transmute(dataset_id = id, dataset_name = "points", country_isoa3 = country_isoa3)
+
+mine_features <- dplyr::bind_rows(mine_points, mine_polygons) %>% 
+  dplyr::mutate(id = str_pad(dplyr::row_number(), pad = "0", 20))
+
+mine_split <- split(mine_features, mine_features$country_isoa3)
+pb <- progress::progress_bar$new(total = length(mine_split))
+system.time(dist_matrices <- purrr::map_dfr(
+  .x = mine_split,
+  .f = calc_dist_matrix,
+  split_att = "country_isoa3",
+  output_dir = derived_data_path,
+  pb = pb)
+)
+```
+
+
+## Create mining clusters per country 
+
+Below we cluster mining features based on the distance matrix for each country. 
+We set the cutting distance to 10 km, see `?fastcluster::hclust` and `?stats::cutree`.
+Features further than 10 km from each other are related only if other features connect them,
+see [10.1038/s41597-020-00624-w](https://doi.org/10.1038/s41597-020-00624-w).
+
+DBSCAN algorithm works better to cluster mining points and polygons because of 
+the heterogeneity of the data. I set `minPts=1` to allow for clusters composed of 
+a single feature. The argument `eps` was set to `20000`, so that algorithm is flexible 
+to cluster distant mining features. Though, in many cases the clusters are kept small. 
+The results were visually checked. 
+
+```{r h-cluster}
+h <- units::set_units(10000, m)
+dist_files <- dir(here::here(derived_data_path, "dist_matrix"), full.names = TRUE)
+names(dist_files) <- stringr::str_remove_all(basename(dist_files), ".rds")
+mine_clusters <- parallel::mclapply(names(mine_split), function(f){
+  hcluster <- 1
+  dbcluster <- 1
+  if(f %in% names(dist_files)){
+    dist_matrix <- readRDS(dist_files[[f]])
+    hcluster <- fastcluster::hclust(dist_matrix, method = "single") %>% 
+      cutree(h = as.numeric(units::set_units(h, m)))
+    dbcluster <- dbscan::dbscan(dist_matrix, eps = as.numeric(h), minPts = 1)$cluster
+  }
+  mine_split[[f]] %>% 
+    sf::st_drop_geometry() %>% 
+    tibble::as_tibble() %>% 
+    dplyr::transmute(hcluster_id = hcluster,
+                     dbcluster_id = dbcluster,
+                     dataset_id = dataset_id, 
+                     country_isoa3 = country_isoa3,
+                     dataset_name = dataset_name)
+}) %>% 
+  dplyr::bind_rows() %>% 
+  dplyr::group_by(country_isoa3, hcluster_id) %>% 
+  dplyr::mutate(hcluster_id = str_pad(cur_group_id(), pad = "0", 20)) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::group_by(country_isoa3, dbcluster_id) %>%
+  dplyr::mutate(dbcluster_id = str_pad(cur_group_id(), pad = "0", 20)) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::select(hcluster_id, dbcluster_id, dataset_id, dataset_name) 
+```
+
+```{r build-cluster-tables}
+mines_gee %>% 
+  dplyr::select(id, country_isoa3, country_name, area) %>% 
+  dplyr::left_join(dplyr::filter(mine_clusters, dataset_name == "polygons") %>% dplyr::select(-dataset_name), 
+                   by = c("id" = "dataset_id")) %>% 
+  sf::st_write(here::here(derived_tables_path, "mine_polygons.geojson"), delete_dsn = TRUE)
+
+mine_properties %>% 
+  dplyr::select(id, commodities_list, development_stage, operating_status, country_name, country_isoa3) %>% 
+  dplyr::left_join(dplyr::filter(mine_clusters, dataset_name == "points") %>% dplyr::select(-dataset_name), 
+                   by = c("id" = "dataset_id")) %>% 
+  sf::st_write(here::here(derived_tables_path, "mine_properties.geojson"), delete_dsn = TRUE)
+```
+
+## Mine production 
+
+```{r build-production-table}
+here::here(raw_data_path, "mine_properties") %>% 
+  dir(pattern = "_production.Rdata", full.names = TRUE) %>% 
+  lapply(function(f){
+    load(f)
+    tibble::as_tibble(x) %>% 
+      dplyr::rename(id = snl_id, commodity_name = commodity, 
+                    quantity = value, quantity_unit = unit) %>%
+      dplyr::filter(!is.na(quantity)) %>% 
+      dplyr::mutate(
+        quantity_unit = ifelse(quantity_unit == "ct", "carat", quantity_unit),
+        quantity_unit = ifelse(quantity_unit == "tonne", "metric_ton", quantity_unit),
+        quantity_unit = ifelse(quantity_unit == "lb", "lbs", quantity_unit),
+        quantity = purrr::map2_dbl(.x = quantity, 
+                                   .y = quantity_unit, 
+                                   .f = measurements::conv_unit, to = "metric_ton") %>% unlist(),
+        quantity_unit = "metric_ton") %>% 
+      dplyr::mutate(id = str_pad(as.hexmode(id), pad = "0", 20))
+  }) %>% 
+  dplyr::bind_rows() %>% 
+  readr::write_csv(here::here(derived_tables_path, "mine_production.csv"))
+
+
+load("data/raw_data/mine_properties/Ore.Rdata")
+Ore %>% 
+  dplyr::select(id = snl_id, year, quantity = value, quantity_unit = unit) %>% 
+  dplyr::filter(!is.na(quantity)) %>% 
+  dplyr::mutate(id = str_pad(as.hexmode(id), pad = "0", 20)) %>% 
+  readr::write_csv(here::here(derived_tables_path, "mine_ore_processed.csv"))
+```
+
+## Additional tables 
+
+```{r additional-tables}
+tibble::tribble(~biome_group, ~biome_name,
+                "Boreal Forests/Taiga", "Boreal Forests/Taiga",
+                "Other", "Deserts & Xeric Shrublands",
+                "Other", "Flooded Grasslands & Savannas",
+                "Other", "Mangroves",
+                "Mediterranean", "Mediterranean Forests, Woodlands & Scrub",
+                "Other", "Montane Grasslands & Shrublands",
+                "Temperate", "Temperate Broadleaf & Mixed Forests",
+                "Temperate", "Temperate Conifer Forests",
+                "Temperate", "Temperate Grasslands, Savannas & Shrublands",
+                "Tropical & Subtropical", "Tropical & Subtropical Coniferous Forests",
+                "Tropical & Subtropical", "Tropical & Subtropical Dry Broadleaf Forests",
+                "Tropical & Subtropical", "Tropical & Subtropical Grasslands, Savannas & Shrublands",
+                "Tropical & Subtropical", "Tropical & Subtropical Moist Broadleaf Forests",
+                "Other", "Tundra") %>% 
+  readr::write_csv(here::here(derived_tables_path, "biome_groups.csv"))
+```
+
+Commodities groups according to [10.1038/s41467-020-17928-5](https://doi.org/10.1038/s41467-020-17928-5).
+
+```{r define-commodities-groups}
+development_groups <- tibble::tribble(
+  ~development_group,             ~development_stage,
+  "Operational",      "Preproduction",
+  "Operational",      "Construction Planned",
+  "Operational",      "Construction Started",
+  "Operational",      "Commissioning",
+  "Operational",      "Operating",
+  "Operational",      "Satellite",
+  "Operational",      "Expansion",
+  "Operational",      "Limited Production",
+  "Operational",      "Residual Production",
+  "Pre-operational",  "Grassroots",
+  "Pre-operational",  "Exploration",
+  "Pre-operational",  "Target Outline",
+  "Pre-operational",  "Reserves Development",
+  "Pre-operational",  "Advanced Exploration",
+  "Pre-operational",  "Prefeas/Scoping",
+  "Pre-operational",  "Feasibility",
+  "Pre-operational",  "Feasibility Started",
+  "Pre-operational",  "Feasibility Complete",
+  "Closed",           "Closed"
+)
+
+readr::write_csv(development_groups, 
+                 here::here(derived_tables_path, "development_groups.csv"))
+
+```
+
+## Aggregated tables 
+
+```{r aggregate-tables}
+# Spatial layers
+mine_properties <- sf::st_read(dsn = here::here(derived_tables_path, "mine_properties.geojson"))
+
+mine_polygons <- sf::st_read(dsn = here::here(derived_tables_path, "mine_polygons.geojson"))
+
+# Mining attribute tables 
+mine_production <- readr::read_csv(here::here(derived_tables_path, "mine_production.csv"))
+mine_ore_processed <- readr::read_csv(here::here(derived_tables_path, "mine_ore_processed.csv"))
+
+# Concordance and groups 
+development_groups <- readr::read_csv(here::here(derived_tables_path, "development_groups.csv"))
+biome_groups <- readr::read_csv(here::here(derived_tables_path, "biome_groups.csv"))
+
+# Make cluster groups 
+fun_collapse_groups <- function(x){
+  x <- unlist(x)
+  # if(length(x)<1) return("Unknown")
+  glue::glue_collapse(glue::glue("{unique(x)}"), sep = ",", width = Inf)
+}
+
+fun_adjust_operation_status <- function(x){
+  x <- fun_collapse_groups(x)
+  if(is.na(x)) return("Unknown")
+  if(stringr::str_detect(x, "Operational")) return("Operational")
+  if(stringr::str_detect(x, "Pre-operational")) return("Pre-operational") 
+  if(stringr::str_detect(x, "Closed")) return("Closed")
+  return("Unknown")
+}
+
+mine_properties %>% 
+  tidyr::separate_rows(commodities_list, sep = ",") %>% 
+  dplyr::left_join(development_groups, by = c("development_stage" = "development_stage")) %>% 
+  dplyr::group_by(hcluster_id) %>% 
+  dplyr::summarise(
+    country_isoa3 = unique(country_isoa3), 
+    country_name = unique(country_name), 
+    commodities_list = fun_collapse_groups(commodities_list),
+    development_stage = fun_collapse_groups(development_stage),
+    operating_status = fun_collapse_groups(operating_status),
+    development_group = fun_adjust_operation_status(development_group), .groups = 'drop') %>% 
+  sf::st_write(here::here(derived_tables_path,"mine_properties_hcluster.geojson"), delete_dsn = TRUE)
+
+mine_properties %>% 
+  tidyr::separate_rows(commodities_list, sep = ",") %>% 
+  dplyr::left_join(development_groups, by = c("development_stage" = "development_stage")) %>% 
+  dplyr::group_by(dbcluster_id) %>% 
+  dplyr::summarise(
+    country_isoa3 = unique(country_isoa3), 
+    country_name = unique(country_name), 
+    commodities_list = fun_collapse_groups(commodities_list),
+    development_stage = fun_collapse_groups(development_stage),
+    operating_status = fun_collapse_groups(operating_status),
+    development_group = fun_adjust_operation_status(development_group), .groups = 'drop') %>% 
+  dplyr::mutate(development_group = purrr::map(.x = development_group, .f = fun_adjust_operation_status)) %>% 
+  sf::st_write(here::here(derived_tables_path,"mine_properties_dbcluster.geojson"), delete_dsn = TRUE)
+
+dplyr::group_by(mine_polygons, hcluster_id) %>% 
+  dplyr::summarise(country_isoa3 = unique(country_isoa3), 
+                   country_name = unique(country_name), 
+                   area = sum(area, na.rm = TRUE), 
+                   .groups = 'drop') %>% 
+  sf::st_write(here::here(derived_tables_path,"mine_polygons_hcluster.geojson"), delete_dsn = TRUE)
+
+dplyr::group_by(mine_polygons, dbcluster_id) %>% 
+  dplyr::summarise(country_isoa3 = unique(country_isoa3), 
+                   country_name = unique(country_name), 
+                   area = sum(area, na.rm = TRUE), 
+                   .groups = 'drop') %>% 
+  sf::st_write(here::here(derived_tables_path,"mine_polygons_dbcluster.geojson"), delete_dsn = TRUE)
+
+mine_properties %>% 
+  sf::st_drop_geometry() %>% 
+  tibble::as_tibble() %>% 
+  dplyr::select(id, hcluster_id) %>% 
+  dplyr::right_join(mine_production, by = c("id" = "id")) %>% 
+  dplyr::group_by(hcluster_id, commodity_name, year) %>% 
+  dplyr::summarise(quantity = sum(quantity, na.rm = TRUE),
+                   quantity_unit = unique(quantity_unit), .groups = 'drop') %>% 
+  readr::write_csv(here::here(derived_tables_path, "mine_production_hcluster.csv"))
+
+mine_properties %>% 
+  sf::st_drop_geometry() %>% 
+  tibble::as_tibble() %>% 
+  dplyr::select(id, dbcluster_id) %>% 
+  dplyr::right_join(mine_production, by = c("id" = "id")) %>% 
+  dplyr::group_by(dbcluster_id, commodity_name, year) %>% 
+  dplyr::summarise(quantity = sum(quantity, na.rm = TRUE),
+                   quantity_unit = unique(quantity_unit), .groups = 'drop') %>% 
+  readr::write_csv(here::here(derived_tables_path, "mine_production_dbcluster.csv"))
+
+mine_properties %>% 
+  sf::st_drop_geometry() %>% 
+  tibble::as_tibble() %>% 
+  dplyr::select(id, hcluster_id) %>% 
+  dplyr::right_join(mine_ore_processed, by = c("id" = "id")) %>% 
+  dplyr::group_by(hcluster_id, year) %>% 
+  dplyr::summarise(quantity = sum(quantity, na.rm = TRUE),
+                   quantity_unit = unique(quantity_unit), .groups = 'drop') %>% 
+  readr::write_csv(here::here(derived_tables_path, "mine_ore_processed_hcluster.csv"))
+
+mine_properties %>% 
+  sf::st_drop_geometry() %>% 
+  tibble::as_tibble() %>% 
+  dplyr::select(id, dbcluster_id) %>% 
+  dplyr::right_join(mine_ore_processed, by = c("id" = "id")) %>% 
+  dplyr::group_by(dbcluster_id, year) %>% 
+  dplyr::summarise(quantity = sum(quantity, na.rm = TRUE),
+                   quantity_unit = unique(quantity_unit), .groups = 'drop') %>% 
+  readr::write_csv(here::here(derived_tables_path, "mine_ore_processed_dbcluster.csv"))
+
+sf::st_drop_geometry(mine_polygons) %>% 
+  tibble::as_tibble() %>% 
+  dplyr::left_join(land_cover_extensions, by = c("id" = "id_polygon")) %>% 
+  dplyr::group_by(hcluster_id) %>% 
+  dplyr::summarise(country_isoa3 = unique(country_isoa3), 
+                   country_name = unique(country_name), 
+                   biome_name = biome_name[which.max(area)],
+                   biome_code = biome_code[which.max(area)],
+                   eco_name = eco_name[which.max(area)],
+                   eco_code = eco_code[which.max(area)],
+                   area = sum(area, na.rm = TRUE), 
+                   .groups = 'drop') %>% 
+  dplyr::left_join(biome_groups, by = c("biome_name" = "biome_name")) %>% 
+  readr::write_csv(here::here(derived_tables_path, "land_cover_extensions_hcluster.csv"))
+
+sf::st_drop_geometry(mine_polygons) %>% 
+  tibble::as_tibble() %>% 
+  dplyr::left_join(land_cover_extensions, by = c("id" = "id_polygon")) %>% 
+  dplyr::group_by(dbcluster_id) %>% 
+  dplyr::summarise(country_isoa3 = unique(country_isoa3), 
+                   country_name = unique(country_name), 
+                   biome_name = biome_name[which.max(area)],
+                   biome_code = biome_code[which.max(area)],
+                   eco_name = eco_name[which.max(area)],
+                   eco_code = eco_code[which.max(area)],
+                   area = sum(area, na.rm = TRUE), 
+                   .groups = 'drop') %>% 
+  dplyr::left_join(biome_groups, by = c("biome_name" = "biome_name")) %>% 
+  readr::write_csv(here::here(derived_tables_path, "land_cover_extensions_dbcluster.csv"))
+```
+
