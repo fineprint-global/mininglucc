@@ -15,6 +15,8 @@ library(here)
 library(sf)
 library(viridis)
 library(rnaturalearth)
+library(spgwr)
+library(spdep)
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
@@ -63,7 +65,20 @@ polygons_clusters %>%
   dplyr::mutate(development_group = ifelse(is.na(development_group), "Unknown", development_group)) %>% 
   dplyr::group_by(development_group) %>% 
   dplyr::summarise(n = n(), area = sum(area)) %>% 
-  dplyr::mutate(n.perc = n/sum(n)*100, area.perc = area/sum(area)*100) 
+  dplyr::mutate(n.perc = n/sum(n)*100, area.perc = area/sum(area)*100)
+```
+
+## Polygons cluster X missing commodity 
+```{r polygons-operation-stage}
+polygons_clusters %>% 
+  sf::st_drop_geometry() %>%
+  tibble::as_tibble() %>% 
+  dplyr::left_join(sf::st_drop_geometry(properties_clusters), by = c("hcluster_id" = "hcluster_id")) %>% 
+  dplyr::mutate(commodities_list = ifelse(is.na(commodities_list), "Unknown", 
+                                   ifelse(stringr::str_detect(commodities_list, ","), "Companion", "Single host"))) %>% 
+  dplyr::group_by(commodities_list) %>% 
+  dplyr::summarise(n = n(), area = sum(area)) %>% 
+  dplyr::mutate(n.perc = n/sum(n)*100, area.perc = area/sum(area)*100)
 ```
 
 *Notes:*
@@ -224,3 +239,54 @@ mine_area_intensity %>%
        y = 'Area [sqkm]') +
    guides(fill = guide_legend(title="Spatial cluster type"))
 ```
+
+```{r production-area-regression}
+lmodel <- lm(area ~ quantity, data = mine_area_intensity)
+summary(lmodel)
+
+mine_ols <- glm(area ~ quantity, data = mine_area_intensity) 
+summary(mine_ols)
+
+mine_sp <- polygons_clusters %>% 
+  dplyr::select(hcluster_id) %>% 
+  dplyr::mutate(geometry = sf::st_centroid(geometry)) %>% 
+  dplyr::right_join(mine_area_intensity, by = c("hcluster_id" = "hcluster_id")) %>%
+  dplyr::group_by(hcluster_id) %>%
+  dplyr::filter(commodity_name =="Coal") %>% 
+  dplyr::summarise(quantity = sum(quantity, na.rm = TRUE), area = sum(area, na.rm = TRUE)) %>% 
+  dplyr::filter(!is.na(area), !is.na(quantity)) %>% 
+  dplyr::mutate(geometry = sf::st_centroid(geometry))  
+
+mine_sp %>%
+  tidyr::pivot_longer(cols = c(quantity, area)) %>% 
+  ggplot() +
+  geom_histogram(aes(x=value)) +
+  facet_wrap(~name, ncol = 2)
+
+mine_sp %>%
+  tidyr::pivot_longer(cols = c(quantity, area)) %>% 
+  ggplot() +
+  geom_histogram(aes(x=log10(value))) +
+  facet_wrap(~name, ncol = 2)
+
+cor(mine_sp$area, mine_sp$quantity)
+
+mine_gwrb1 <- spgwr::gwr.sel(area ~ quantity, data = sf::as_Spatial(mine_sp))
+mine_gwrb1
+mine_gwr <- spgwr::gwr(area ~ quantity, data = sf::as_Spatial(mine_sp), 
+                       bandwidth = mine_gwrb1, se.fit = TRUE, hatmatrix = TRUE)
+mine_gwr
+BFC02.gwr.test(mine_gwr)
+BFC99.gwr.test(mine_gwr)
+LMZ.F1GWR.test(mine_gwr)
+LMZ.F2GWR.test(mine_gwr)
+```
+
+# TODO: 
+## Cluster 
+### Optmize cluster (loop over different distance threshhold) record the area wthout commodity and the area of conpanion
+### Can this function be optimized as an objective function?????
+
+## Spatial analysis
+### GWR x OLS per commodity
+### How to identify differences between biomes???? Add a dummy????

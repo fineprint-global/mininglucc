@@ -21,11 +21,12 @@ library(purrr)
 library(lwgeom)
 library(glue)
 library(measurements)
+library(mco)
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r data-dir}
-version <- "20210317"
+version <- "202201170917"
 raw_data_path <- here::here('analysis', 'data', 'raw_data')
 derived_data_path <- here::here('analysis', 'data', 'derived_data', version)
 derived_tables_path <- glue::glue(derived_data_path, '/tables')
@@ -51,25 +52,26 @@ ecoregions <- sf::st_read(glue::glue(raw_data_path, "/Ecoregions2017.shp")) %>%
   dplyr::transmute(biome_name = BIOME_NAME,
                    biome_code = BIOME_NUM,
                    eco_name = ECO_NAME,
-                   eco_code = ECO_ID)
+                   eco_code = ECO_ID) |> 
+  sf::st_make_valid()
 ```
 
 ## Global mining areas
 
 For mining areas we use the mining polygons data set available from [10.1594/PANGAEA.910894](https://doi.org/10.1594/PANGAEA.910894). This data set is described here [10.1038/s41597-020-00624-w](https://doi.org/10.1038/s41597-020-00624-w). The polygons cover the entire globe. 
 ```{r get-mining-polygons}
-pg_record <- pangaear::pg_data(doi = "10.1594/PANGAEA.910894", overwrite = TRUE, mssgs = TRUE)
-unzip(zipfile = pg_record[[1]]$path, 
-      files = "global_mining_polygons_v1.gpkg", 
-      overwrite = TRUE, 
-      exdir = raw_data_path)
+# pg_record <- pangaear::pg_data(doi = "10.1594/PANGAEA.910894", overwrite = TRUE, mssgs = TRUE)
+# unzip(zipfile = pg_record[[1]]$path, 
+#       files = "global_mining_polygons_v1.gpkg", 
+#       overwrite = TRUE, 
+#       exdir = raw_data_path)
 
-mining_polygons <- sf::st_read(glue::glue(raw_data_path, "/global_mining_polygons_v1.gpkg"), fid_column_name = "fid") %>% 
-    dplyr::transmute(id = stringr::str_pad(as.hexmode(fid), pad = "0", 20), 
-                     area = AREA,
-                     country_name = COUNTRY_NAME,
-                     country_isoa3 = ISO3_CODE, 
-                     geometry = geom)
+mining_polygons <- sf::st_read(glue::glue(derived_data_path, "/global_mining_polygons_v2.gpkg"), fid_column_name = "fid") %>% 
+  dplyr::transmute(id = stringr::str_pad(as.hexmode(fid), pad = "0", 20), 
+                   area = AREA,
+                   country_name = COUNTRY_NAME,
+                   country_isoa3 = ISO3_CODE) |> 
+  dplyr::rename(geometry = geom)
 ```
 
 ## Add biomes as attributes of mining polygons
@@ -81,11 +83,10 @@ if(file.exists(file_path)){
   nc <- parallel::detectCores()
   nr <- nrow(mining_polygons)
   system.time(
-    mining_polygons_ecoregions <- mining_pol_eco <- mining_polygons %>% 
+    mining_polygons_ecoregions <- mining_polygons %>% 
       split(., rep(1:ceiling(nr/nc), each=nc, length.out=nr)) %>% 
       parallel::mclapply(mc.cores = nc, FUN = sf::st_join, left = TRUE, y = ecoregions, join = sf::st_nearest_feature) %>% 
-      dplyr::bind_rows() %>% 
-      dplyr::select(-geom) 
+      dplyr::bind_rows() 
   )
   sf::st_write(mining_polygons_ecoregions, file_path)
 }
@@ -105,7 +106,7 @@ mine_properties <- glue::glue(raw_data_path, "/mining_commodities.gpkg") %>%
   dplyr::select(id, mine_name = mine, known_as, commodities_list = list_of_commodities,
   development_stage, operating_status, country_name = COUNTRY_NAME, country_isoa3 = ISO3_CODE, geometry = geom)
 
-mine_polygons <-mining_polygons_ecoregions %>% 
+mine_polygons <- mining_polygons_ecoregions %>% 
   dplyr::transmute(dataset_id = id, dataset_name = "polygons", country_isoa3 = country_isoa3) 
 
 mine_points <- mine_properties %>% 
@@ -437,4 +438,237 @@ mine_production_dbcluster %>%
                 companion = factor(length(unique(commodity_name))>1, c(T, F), c("Companion", "Single host"))) %>% 
   dplyr::ungroup() %>% 
   readr::write_csv(glue::glue(derived_tables_path, "/mine_area_intensity_dbcluster.csv"))
+```
+
+
+```{r optm}
+fitness_hcluster <- function(x){
+  
+    hcluster <- 1
+  
+    fun_collapse_groups <- function(x){
+      x <- unlist(x)
+      glue::glue_collapse(glue::glue("{unique(x)}"), sep = ",", width = Inf)
+    }
+    
+    f = "/home/maus/workspace/mininglucc/analysis/data/derived_data/20210317/dist_matrix/BRA.rds"
+    dist_matrix <- readRDS(dist_files[[f]])
+    hcluster <- fastcluster::hclust(dist_matrix, method = "single") %>% 
+      cutree(h = x[1])
+    
+    cluster_ids <- mine_split[[f]] %>% 
+      sf::st_drop_geometry() %>% 
+      tibble::as_tibble() %>% 
+      dplyr::transmute(hcluster_id = hcluster,
+                       dataset_id = dataset_id,
+                       country_isoa3 = country_isoa3,
+                       dataset_name = dataset_name)
+
+    mine_properties_hcluster <- mine_commodities %>% 
+      dplyr::filter(country_isoa3 == f) %>% 
+      dplyr::left_join(dplyr::filter(cluster_ids, dataset_name == "points"), by = c("id" = "dataset_id")) %>% 
+      tidyr::separate_rows(commodities_list, sep = ",") %>% 
+      dplyr::group_by(hcluster_id) %>% 
+      dplyr::summarise(commodities_list = fun_collapse_groups(commodities_list), .groups = 'drop') %>% 
+      dplyr::transmute(cluster_id = hcluster_id, commodities_list = commodities_list)
+
+    mine_polygons_hcluster <- mine_polygons %>% 
+      dplyr::filter(country_isoa3 == f) %>% 
+      dplyr::left_join(dplyr::filter(cluster_ids, dataset_name == "polygons"), by = c("id" = "dataset_id")) %>% 
+      dplyr::group_by(hcluster_id) %>% 
+      dplyr::summarise(area = sum(area, na.rm = TRUE), .groups = 'drop') 
+    
+    res_hcluster_aux <- mine_properties_hcluster %>% 
+      tidyr::separate_rows(commodities_list, sep = ",") %>% 
+      dplyr::right_join(mine_polygons_hcluster, by = c("cluster_id" = "hcluster_id")) %>% 
+      dplyr::group_by(cluster_id) %>% 
+      dplyr::summarise(n = length(na.omit(commodities_list)), area = sum(area, na.rm = TRUE)) %>% 
+      dplyr::mutate(commodities_list = ifelse(n == 0, "Unknown", ifelse(n == 1, "Single host", "Companion")))
+    
+    res_hcluster <- res_hcluster_aux %>% 
+      dplyr::group_by(commodities_list) %>% 
+      dplyr::summarise(n = dplyr::n(), area = sum(area)) %>% 
+      dplyr::mutate(n.perc = n/sum(n)*100, area.perc = area/sum(area)*100)
+    
+    companion <- dplyr::filter(res_hcluster_aux, commodities_list == "Companion") %>% 
+      dplyr::mutate(n * area) %>% 
+      dplyr::summarise(area = sum(area, na.rm = TRUE)) %>% 
+      .$area
+    
+    unkown <- dplyr::filter(res_hcluster, commodities_list == "Unknown") %>% .$area
+    single_host <- dplyr::filter(res_hcluster, commodities_list == "Single host") %>% .$area
+    
+    y <- numeric(2)
+    y[1] <- companion 
+    y[2] <- unkown
+    #y[3] <- -single_host
+    return(y)
+}
+
+
+get.elbow.points.indices <- function(x, y, threshold) {
+  ids <- order(x)
+  x <- x[ids]
+  y <- y[ids]
+  d1 <- diff(y) / diff(x) # first derivative
+  d2 <- diff(d1) / diff(x[-1]) # second derivative
+  # plot(d2)
+  # indices <- which.max(abs(d2)) + 2
+  # indices <- which(abs(d1)>threshold) + 1
+  indices <- which.max(abs(d1)) + 1
+  #d1 <- diff(y[indices]) / diff(x[indices]) # first derivative
+  #d2 <- diff(d1) / diff(x[indices][-1]) # second derivative
+  # indices <- which(abs(d2) > threshold)
+  return(ids[indices])
+}
+
+mine_commodities <- mine_properties %>% 
+  dplyr::select(id, country_isoa3, commodities_list) %>% 
+  sf::st_drop_geometry() %>% 
+  tibble::as_tibble()
+mine_polygons <- mining_polygons_ecoregions %>% 
+  sf::st_drop_geometry() %>%
+  tibble::as_tibble() %>% 
+  dplyr::select(id, country_isoa3, area)
+dist_files <- dir(glue::glue(derived_data_path, "/dist_matrix"), full.names = TRUE)
+names(dist_files) <- stringr::str_remove_all(basename(dist_files), ".rds")
+
+# f <- "USA"
+# usar2 <- mco::nsga2(fn = fitness_hcluster, idim = 1, odim = 2, generations = 2, popsize = 100, 
+#                  lower.bounds = c(1000), upper.bounds = c(15000))
+# 
+# f <- "BRA"
+# bra2 <- mco::nsga2(fn = fitness_hcluster, idim = 1, odim = 2, generations = 2, popsize = 100,
+#                  lower.bounds = c(1000), upper.bounds = c(15000))
+# f <- "ZAF"
+# zaf2 <- mco::nsga2(fn = fitness_hcluster, idim = 1, odim = 2, generations = 2, popsize = 100,
+#                  lower.bounds = c(1000), upper.bounds = c(15000))
+
+library(parallelMap)
+library(ecr)
+parallelStartSocket(4)    # start in socket mode and create 2 processes on localhost
+parallelExport("f", "mine_split", "dist_files", "mine_commodities", "mine_polygons", "fun_collapse_groups", "fun_collapse_groups")
+parallelLibrary("magrittr")
+lower = c(1000)
+upper = c(15000)
+system.time(
+  zaf2 <- ecr::ecr(fitness.fun = fitness_hcluster, n.dim = 1, n.objectives = 2, representation = "float", 
+                   lower = lower, upper = upper, mu = 8, lambda = 8, mutator = setup(mutGauss, lower = lower, upper = upper))
+)
+parallelStop()            # turn parallelization off again
+plot(zaf2$pareto.front)
+
+## 50 x 2
+#  user  system elapsed 
+# 5.172   2.137 228.185 
+
+
+## 8 x 8 
+#  user  system elapsed 
+# 3.258   2.098 220.277 
+  
+plot(zaf2$pareto.front)
+
+f <- "ZAF"
+system.time(
+zaf1 <- mco::nsga2(fn = fitness_hcluster, idim = 1, odim = 2, generations = 8, popsize = 8,
+                   lower.bounds = c(1000), upper.bounds = c(15000))
+)
+#    user  system elapsed 
+# 166.422  10.235 180.288 
+
+library(caRamel)
+f <- "BRA"
+results <-
+  caRamel::caRamel(nobj = 2, 
+                   nvar = 1,
+                   minmax = c(FALSE, FALSE) ,
+                   bounds = matrix(data = c(1000, 15000), nrow = 1, ncol = 2),
+                   func = fitness_hcluster,
+                   popsize = 1000, # size of the genetic population
+                   archsize = 1, # size of the archive for the Pareto front
+                   maxrun = 100, # maximum number of calls
+                   prec = matrix(100, nrow = 1, ncol = 2), # 100km2
+                   carallel=FALSE, 
+                   sensitivity=TRUE) # sensitivity required
+
+results
+
+r2 <- zaf1
+aux <- r2$value %>% 
+  as.data.frame() %>% 
+  tibble::as_tibble() %>% 
+  dplyr::mutate(id = dplyr::row_number(), par = r2$par[,1]) %>% 
+  dplyr::group_by(V2) %>% 
+  dplyr::summarise(id = id[which.min(V1)], par = par[which.min(V1)], V1 = min(V1)) %>% 
+  dplyr::group_by(V1) %>% 
+  dplyr::summarise(id = id[which.min(V1)], par = par[which.min(V2)], V2 = min(V2))
+
+r2$value <- r2$value[aux$id,]
+r2$par <- r2$par[aux$id,]
+r2$pareto.optimal <- r2$pareto.optimal[aux$id]
+#points(findCutoff(aux$V1, aux$V2, method = "curvature"), col = "green")
+ids <- get.elbow.points.indices(x=aux$V1, y=aux$V2, threshold = 0.1)
+plot(r2)
+points(aux$V1[ids], aux$V2[ids], col = "blue")
+points(aux$V1[18], aux$V2[18], col = "green")
+r2$par[ids]
+r2 <- bra2
+plot(r2)
+lines(x,predict(loess(y ~ x)),type="l")
+ids <- order(x)
+KneeArrower:::findCutoffCurvature(x,predict(loess(y ~ x)))
+points(findCutoff(r2$value[ids,1], r2$value[ids,2], method = "curvature"), col = "green")
+ids <- get.elbow.points.indices(x=r2$value[,1], y=r2$value[,2], threshold = 1e4)
+points(r2$value[ids,1], r2$value[ids,2], col = "blue")
+
+paretoSet(r2)
+dominatedHypervolume(r2)
+
+
+f <- "USA"
+# debugonce(nsga2R)
+hcluster_optim <- nsga2R::nsga2R(fn = fitness_hcluster, varNo = 2, objDim = 2, generations = 10, popSize = 100, 
+                        lowerBounds = c(1000, 1), upperBounds = c(15000, 1))
+par_optim <- hcluster_optim$parameters[hcluster_optim$paretoFrontRank == 1, ] %>% 
+  as.data.frame() %>% 
+  tibble::as_tibble() %>% 
+  dplyr::transmute(h = V1)
+
+hcluster_optim$objectives[hcluster_optim$paretoFrontRank == 1, ] %>% 
+  as.data.frame() %>% 
+  dplyr::transmute(Single_host = -V2, Unkown = V1) %>% 
+  dplyr::bind_cols(par_optim) %>% 
+  dplyr::group_by(Single_host, Unkown) %>% 
+  dplyr::summarise(h = min(h), .groups = 'drop') %>% 
+  dplyr::arrange(desc(Single_host), Unkown) %>% 
+  dplyr::mutate(ds = c(NA, diff(Single_host)), du = c(NA, diff(Unkown)), r = du/ds) %>% 
+  round(2) %>% 
+  View()
+
+plot(hcluster_optim$objectives[,1], hcluster_optim$objectives[,2])
+
+library(rPref)
+
+sky <- hcluster_optim$objectives %>% 
+  as.data.frame() %>% 
+  tibble::as_tibble() %>% 
+  dplyr::transmute(Unkown = V1, 
+                   Single_host = V2,
+                   h = hcluster_optim$parameters[, 1],
+                   .level = hcluster_optim$paretoFrontRank)
+
+sky <- rPref::psel(df, low(Unkown) * low(Single_host))
+
+ggplot(sky, aes(x = Unkown, y = Single_host)) + geom_point(shape = 21) + 
+  geom_point(data = sky, size = 3) + geom_step(data = sky, direction = "vh") 
+
+p <- low(Unkown) * low(Single_host)
+res <- psel(df, p, top = nrow(df))
+
+ggplot(res, aes(x = Unkown, y = Single_host, color = factor(.level))) +
+  geom_point(size = 3) + 
+  geom_step(direction = "vh") +
+  scale_color_viridis_d()
+
 ```
